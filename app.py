@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 LINE_SECRET = os.environ["LINE_CHANNEL_SECRET"]
 LINE_TOKEN  = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
-ANTH_KEY    = os.environ["ANTHROPIC_API_KEY"]
+GEMINI_KEY  = os.environ["GEMINI_API_KEY"]
 
 conversation_histories: dict[str, list] = {}
 
@@ -57,29 +57,29 @@ async def download_image(msg_id: str) -> bytes:
 
 
 async def ask_claude(user_id: str, message: str) -> str:
+    """使用 Gemini 回覆聊天問題"""
+    api_key = os.environ["GEMINI_API_KEY"]
     history = conversation_histories.setdefault(user_id, [])
-    history.append({"role": "user", "content": message})
+    history.append({"role": "user", "parts": [{"text": message}]})
     if len(history) > 20:
         history[:] = history[-20:]
+
+    system = (
+        "你是一個專業的美股持股健檢助理，專精於科技股分析。"
+        "用繁體中文回答，簡潔易讀。只提供資訊分析，非投資建議。"
+    )
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    payload = {
+        "system_instruction": {"parts": [{"text": system}]},
+        "contents": history,
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024}
+    }
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": ANTH_KEY,
-                     "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json={
-                "model": "claude-sonnet-4-20250514",
-                "max_tokens": 1024,
-                "system": (
-                    "你是一個專業的美股持股健檢助理，專精於科技股分析。"
-                    "用繁體中文回答，簡潔易讀。只提供資訊分析，非投資建議。"
-                ),
-                "messages": history,
-            },
-        )
+        resp = await client.post(url, json=payload)
         resp.raise_for_status()
-    reply = resp.json()["content"][0]["text"]
-    history.append({"role": "assistant", "content": reply})
+
+    reply = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+    history.append({"role": "model", "parts": [{"text": reply}]})
     return reply
 
 
@@ -282,3 +282,8 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 @app.get("/")
 async def health():
     return {"status": "running", "time": datetime.now().isoformat()}
+
+
+# ── 匯入並掛載測試路由 ──
+from test_api import router as test_router
+app.include_router(test_router)
