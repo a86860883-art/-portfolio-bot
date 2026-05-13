@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 LINE_SECRET = os.environ["LINE_CHANNEL_SECRET"]
 LINE_TOKEN  = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
-GEMINI_KEY  = os.environ["GEMINI_API_KEY"]
+ANTH_KEY    = os.environ["ANTHROPIC_API_KEY"]
 
 conversation_histories: dict[str, list] = {}
 
