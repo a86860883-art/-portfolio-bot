@@ -121,16 +121,23 @@ async def process_report_background():
             await push_text("尚無持股資料，請先傳送截圖")
             return
         tickers = [h["symbol"] for h in holdings]
+        log.info(f"開始產生報告，持股：{tickers}")
         t, s, n, f = await asyncio.gather(
             analyze_technicals(tickers),
             get_sentiment(tickers),
             get_news(tickers),
             get_filings(tickers),
         )
-        await push_report(await generate_report(holdings, t, s, n, f))
+        log.info("資料蒐集完成，呼叫 AI 產生報告")
+        report = await generate_report(holdings, t, s, n, f)
+        await push_report(report)
+        log.info("報告推播完成")
+    except AttributeError as e:
+        log.error(f"報告 AttributeError：{e}", exc_info=True)
+        await push_text(f"報告產生失敗（資料格式問題）：{e}\n請重試或傳送新截圖更新持股資料")
     except Exception as e:
-        log.error(f"背景報告失敗：{e}")
-        await push_text(f"報告產生失敗，請稍後重試。\n（{type(e).__name__}）")
+        log.error(f"報告失敗：{type(e).__name__}: {e}", exc_info=True)
+        await push_text(f"報告產生失敗，請稍後重試。\n（{type(e).__name__}: {str(e)[:100]}）")
 
 
 HELP_TEXT = """📊 持股健檢 Bot 使用說明
@@ -183,11 +190,14 @@ async def cmd_technical() -> str:
     lines = ["技術分析訊號\n" + "─" * 24]
     for sym, t in tech.items():
         if "error" in t:
-            lines.append(f"{sym}：分析失敗")
+            lines.append(f"{sym}：分析失敗（{t.get('error','')}）")
             continue
+        price = t.get("price", 0)
+        ma50  = t.get("ma50", 0)
+        rsi   = t.get("rsi", "N/A")
         sig   = "、".join(t.get("signals", [])[:2]) or "無明顯訊號"
-        above = "站上" if t["price"] > t["ma50"] else "跌破"
-        lines.append(f"{sym}  ${t['price']}  RSI {t['rsi']}  {above} MA50\n  {sig}")
+        above = "站上" if (price and ma50 and price > ma50) else "跌破"
+        lines.append(f"{sym}  ${price}  RSI {rsi}  {above} MA50\n  {sig}")
     return "\n".join(lines)
 
 
