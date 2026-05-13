@@ -1,49 +1,68 @@
 """
 StockTwits - 免費社群情緒偵測
-不需要 API Key，公開端點直接使用
 """
 import asyncio
 import logging
 import httpx
 
 log = logging.getLogger(__name__)
-
 BASE = "https://api.stocktwits.com/api/2"
+
+EMPTY = {"bullish": 0, "bearish": 0, "total": 0, "score": 0, "messages": []}
+
+
+def _safe_get(obj, *keys, default=None):
+    """安全多層取值，任何層是 None 都回傳 default"""
+    for key in keys:
+        if obj is None or not isinstance(obj, dict):
+            return default
+        obj = obj.get(key)
+    return obj if obj is not None else default
 
 
 async def _fetch_ticker(client: httpx.AsyncClient, symbol: str) -> dict:
-    """取得單一 ticker 的社群情緒與熱門訊息"""
     try:
         resp = await client.get(
             f"{BASE}/streams/symbol/{symbol}.json",
-            params={"limit": 30},
-            timeout=10,
+            params={"limit": 30}, timeout=10,
         )
-        if resp.status_code == 429:
-            log.warning(f"StockTwits rate limit，跳過 {symbol}")
-            return {"symbol": symbol, "bullish": 0, "bearish": 0, "total": 0, "score": 0, "messages": []}
-        resp.raise_for_status()
+        if resp.status_code != 200:
+            return {"symbol": symbol, **EMPTY}
         data = resp.json()
     except Exception as e:
         log.warning(f"StockTwits {symbol} 失敗：{e}")
-        return {"symbol": symbol, "bullish": 0, "bearish": 0, "total": 0, "score": 0, "messages": []}
+        return {"symbol": symbol, **EMPTY}
 
-    # 過濾掉 None 元素
-    messages = [m for m in (data.get("messages") or []) if m is not None]
+    raw = data.get("messages") or []
+    messages = []
+    for m in raw:
+        try:
+            if isinstance(m, dict):
+                messages.append(m)
+        except Exception:
+            pass
 
-    bullish = sum(
-        1 for m in messages
-        if (m.get("entities") or {}).get("sentiment", {}).get("basic") == "Bullish"
-    )
-    bearish = sum(
-        1 for m in messages
-        if (m.get("entities") or {}).get("sentiment", {}).get("basic") == "Bearish"
-    )
+    bullish, bearish = 0, 0
+    for m in messages:
+        try:
+            sentiment = _safe_get(m, "entities", "sentiment", "basic")
+            if sentiment == "Bullish":
+                bullish += 1
+            elif sentiment == "Bearish":
+                bearish += 1
+        except Exception:
+            pass
 
-    top_msgs = [
-        m["body"][:120] for m in messages
-        if m.get("body") and len(m.get("body", "")) > 20
-    ][:3]
+    top_msgs = []
+    for m in messages:
+        try:
+            body = m.get("body") or ""
+            if len(body) > 20:
+                top_msgs.append(body[:120])
+            if len(top_msgs) >= 3:
+                break
+        except Exception:
+            pass
 
     return {
         "symbol":   symbol,
@@ -56,15 +75,14 @@ async def _fetch_ticker(client: httpx.AsyncClient, symbol: str) -> dict:
 
 
 async def get_sentiment(tickers: list[str]) -> dict[str, dict]:
-    """
-    回傳每個 ticker 的情緒摘要
-    { "AAPL": { bullish, bearish, score, messages }, ... }
-    """
     async with httpx.AsyncClient() as client:
         results = {}
         for ticker in tickers:
-            results[ticker] = await _fetch_ticker(client, ticker)
+            try:
+                results[ticker] = await _fetch_ticker(client, ticker)
+            except Exception as e:
+                log.warning(f"情緒蒐集 {ticker} 失敗：{e}")
+                results[ticker] = {"symbol": ticker, **EMPTY}
             await asyncio.sleep(0.5)
-
-    log.info(f"StockTwits 情緒蒐集完成：{list(results.keys())}")
+    log.info(f"StockTwits 完成：{list(results.keys())}")
     return results
