@@ -742,18 +742,23 @@ def build_sentiment_flex(sentiment_data: dict) -> dict:
 
 async def push_flex(flex: dict, alt: str):
     user_id = os.environ["LINE_USER_ID"]
-    # alt text 也要清理
     alt = _clean_text(alt, 100) or "通知"
+    payload = {"to": user_id,
+                "messages": [{"type": "flex",
+                               "altText": alt,
+                               "contents": flex}]}
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
-            PUSH_URL, headers=_headers(),
-            json={"to": user_id,
-                  "messages": [{"type": "flex",
-                                "altText": alt,
-                                "contents": flex}]}
+            PUSH_URL, headers=_headers(), json=payload
         )
         if resp.status_code != 200:
-            log.error(f"push_flex 失敗 {resp.status_code}: {resp.text[:300]}")
+            # 印出完整錯誤，幫助找出哪個欄位出問題
+            log.error(f"push_flex {resp.status_code}: {resp.text[:500]}")
+            # 嘗試找出有問題的字串
+            import json as _json
+            flat = _json.dumps(flex, ensure_ascii=False)
+            if len(flat) > 50000:
+                log.error(f"Flex 太大：{len(flat)} bytes（上限約 50000）")
         resp.raise_for_status()
 
 

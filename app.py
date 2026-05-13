@@ -151,17 +151,40 @@ async def process_sentiment_background():
 
 
 async def process_news_background():
-    """重點新聞推播"""
+    """重點新聞推播，Flex 失敗自動改文字"""
     try:
         holdings = load_holdings()
         if not holdings:
             await push_text("尚無持股資料，請先上傳 CSV")
             return
-        tickers  = [h["symbol"] for h in holdings]
-        news     = await get_news(tickers)
-        flex     = build_news_flex(news)
-        await push_flex(flex, "持股重點新聞")
-        log.info("新聞推播完成")
+        tickers = [h["symbol"] for h in holdings]
+        news    = await get_news(tickers)
+
+        # 先嘗試 Flex Message
+        try:
+            flex = build_news_flex(news)
+            await push_flex(flex, "持股重點新聞")
+            log.info("新聞 Flex 推播完成")
+            return
+        except Exception as flex_err:
+            log.warning(f"新聞 Flex 失敗，改用文字：{flex_err}")
+
+        # Flex 失敗 → 改純文字
+        lines = ["🗞 持股重點新聞\n"]
+        seen  = set()
+        for sym, news_list in news.items():
+            for n in (news_list or []):
+                title = (n.get("title") or "")[:50].strip()
+                url   = (n.get("url") or "").strip()
+                if title and title not in seen and url.startswith("http"):
+                    seen.add(title)
+                    lines.append(f"[{sym}] {title}\n{url}\n")
+                if len(seen) >= 5:
+                    break
+            if len(seen) >= 5:
+                break
+        await push_text("\n".join(lines) if seen else "目前無最新新聞")
+
     except Exception as e:
         log.error(f"新聞推播失敗：{e}", exc_info=True)
         await push_text(f"新聞取得失敗：{e}")

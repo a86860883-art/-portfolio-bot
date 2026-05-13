@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 log = logging.getLogger(__name__)
-HOLDINGS_FILE = Path(os.environ.get("HOLDINGS_FILE", "holdings_cache.json"))
+HOLDINGS_FILE = Path(os.environ.get("HOLDINGS_FILE", "/tmp/holdings_cache.json"))
 
 
 def save_holdings(holdings: list[dict], source: str = "screenshot"):
