@@ -551,6 +551,195 @@ def build_news_flex(news_data: dict) -> dict:
 
 # ── 推播函式 ────────────────────────────────────────
 
+
+# ── 社群情緒條狀圖 ──────────────────────────────────
+
+def build_sentiment_flex(sentiment_data: dict) -> dict:
+    """
+    社群情緒條狀圖 Flex Message
+    每檔股票一列：多頭綠條 + 空頭紅條 + 情緒分數
+    零 Token 消耗
+    """
+    # 過濾有資料的股票，按情緒分數排序
+    valid = [
+        (sym, s) for sym, s in sentiment_data.items()
+        if s.get("total", 0) > 0
+    ]
+    valid.sort(key=lambda x: -x[1].get("score", 0))
+
+    if not valid:
+        return {
+            "type": "bubble", "size": "giga",
+            "body": {
+                "type": "box", "layout": "vertical",
+                "paddingAll": "20px",
+                "contents": [
+                    {"type": "text", "text": "社群情緒",
+                     "weight": "bold", "size": "lg"},
+                    {"type": "text",
+                     "text": "目前無 StockTwits 資料",
+                     "size": "sm", "color": "#888888", "margin": "md"},
+                ]
+            }
+        }
+
+    # 整體多空統計
+    total_bull = sum(s.get("bullish", 0) for _, s in valid)
+    total_bear = sum(s.get("bearish", 0) for _, s in valid)
+    total_all  = total_bull + total_bear
+    overall_pct = int(total_bull / total_all * 100) if total_all > 0 else 50
+    overall_color = "#1D9E75" if overall_pct >= 55 else \
+                    "#E24B4A" if overall_pct <= 45 else "#BA7517"
+    overall_label = "整體偏多" if overall_pct >= 55 else \
+                    "整體偏空" if overall_pct <= 45 else "多空均衡"
+
+    bar_rows = []
+    for sym, s in valid:
+        bull  = s.get("bullish", 0)
+        bear  = s.get("bearish", 0)
+        total = bull + bear
+        score = s.get("score", 0)
+
+        bull_pct = int(bull / total * 100) if total > 0 else 50
+        bear_pct = 100 - bull_pct
+
+        # 確保兩邊至少有 1 格寬
+        bull_flex = max(1, bull_pct)
+        bear_flex = max(1, bear_pct)
+
+        # 分數標籤
+        if score > 30:
+            score_color = "#1D9E75"
+            score_label = f"▲ {score}"
+        elif score < -30:
+            score_color = "#E24B4A"
+            score_label = f"▼ {abs(score)}"
+        else:
+            score_color = "#BA7517"
+            score_label = f"  {score}"
+
+        bar_rows.append({
+            "type": "box", "layout": "vertical",
+            "margin": "md",
+            "contents": [
+                # 股票名稱 + 分數
+                {"type": "box", "layout": "horizontal",
+                 "alignItems": "center",
+                 "contents": [
+                     {"type": "text", "text": sym,
+                      "size": "sm", "weight": "bold",
+                      "color": "#111111", "flex": 2},
+                     {"type": "text",
+                      "text": f"多{bull} / 空{bear}",
+                      "size": "xxs", "color": "#888888", "flex": 3},
+                     {"type": "text", "text": score_label,
+                      "size": "sm", "weight": "bold",
+                      "color": score_color, "align": "end", "flex": 1},
+                 ]},
+                # 多空雙色條狀圖
+                {"type": "box", "layout": "horizontal",
+                 "height": "14px", "margin": "xs",
+                 "cornerRadius": "7px",
+                 "contents": [
+                     {"type": "box", "layout": "vertical",
+                      "flex": bull_flex,
+                      "backgroundColor": "#1D9E75",
+                      "cornerRadius": "7px 0px 0px 7px"
+                      if bear_flex > 1 else "7px",
+                      "contents": []},
+                     {"type": "box", "layout": "vertical",
+                      "flex": bear_flex,
+                      "backgroundColor": "#E24B4A",
+                      "cornerRadius": "0px 7px 7px 0px"
+                      if bull_flex > 1 else "7px",
+                      "contents": []},
+                 ]},
+                # 百分比標示
+                {"type": "box", "layout": "horizontal",
+                 "margin": "xs",
+                 "contents": [
+                     {"type": "text",
+                      "text": f"多 {bull_pct}%",
+                      "size": "xxs", "color": "#1D9E75"},
+                     {"type": "filler"},
+                     {"type": "text",
+                      "text": f"{bear_pct}% 空",
+                      "size": "xxs", "color": "#E24B4A"},
+                 ]},
+            ]
+        })
+
+    # 整體情緒大條
+    overall_bar = {
+        "type": "box", "layout": "vertical",
+        "margin": "sm",
+        "backgroundColor": "#F7F7F7",
+        "cornerRadius": "10px",
+        "paddingAll": "12px",
+        "contents": [
+            {"type": "box", "layout": "horizontal",
+             "alignItems": "center",
+             "contents": [
+                 {"type": "text", "text": "整體情緒",
+                  "size": "sm", "color": "#555555", "flex": 1},
+                 {"type": "text", "text": overall_label,
+                  "size": "sm", "weight": "bold",
+                  "color": overall_color, "align": "end"},
+             ]},
+            {"type": "box", "layout": "horizontal",
+             "height": "18px", "margin": "sm",
+             "cornerRadius": "9px",
+             "contents": [
+                 {"type": "box", "layout": "vertical",
+                  "flex": overall_pct,
+                  "backgroundColor": "#1D9E75",
+                  "cornerRadius": "9px 0px 0px 9px",
+                  "contents": []},
+                 {"type": "box", "layout": "vertical",
+                  "flex": max(1, 100 - overall_pct),
+                  "backgroundColor": "#E24B4A",
+                  "cornerRadius": "0px 9px 9px 0px",
+                  "contents": []},
+             ]},
+            {"type": "box", "layout": "horizontal",
+             "margin": "xs",
+             "contents": [
+                 {"type": "text",
+                  "text": f"多頭 {total_bull} 則",
+                  "size": "xxs", "color": "#1D9E75"},
+                 {"type": "filler"},
+                 {"type": "text",
+                  "text": f"{total_bear} 則 空頭",
+                  "size": "xxs", "color": "#E24B4A"},
+             ]},
+        ]
+    }
+
+    return {
+        "type": "bubble", "size": "giga",
+        "header": {
+            "type": "box", "layout": "vertical",
+            "backgroundColor": "#111111", "paddingAll": "14px",
+            "contents": [
+                {"type": "text", "text": "社群情緒分析",
+                 "weight": "bold", "size": "lg", "color": "#FFFFFF"},
+                {"type": "text",
+                 "text": "資料來源：StockTwits · 綠=多頭 紅=空頭",
+                 "size": "xs", "color": "#888888", "margin": "xs"},
+            ]
+        },
+        "body": {
+            "type": "box", "layout": "vertical",
+            "paddingAll": "14px",
+            "contents": [
+                overall_bar,
+                {"type": "separator", "margin": "lg"},
+                *bar_rows,
+            ]
+        }
+    }
+
+
 async def push_flex(flex: dict, alt: str):
     user_id = os.environ["LINE_USER_ID"]
     # alt text 也要清理
