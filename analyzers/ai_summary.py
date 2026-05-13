@@ -36,7 +36,10 @@ def _build_prompt(holdings, technicals, sentiment, news, filings) -> str:
             lines.append(f"社群：多{s['bullish']}/空{s['bearish']}，分數 {s['score']}")
         if n:
             for item in n[:2]:
-                lines.append(f"新聞：[{item['source']}] {item['title'][:70]}")
+                src   = item.get("source") or item.get("publisher") or "新聞"
+                title = item.get("title") or ""
+                if title:
+                    lines.append(f"新聞：[{src}] {title[:70]}")
         if f:
             for filing in f[:1]:
                 lines.append(f"SEC：{filing['date']} {filing['form']} {filing.get('label','')}")

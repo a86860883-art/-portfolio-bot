@@ -48,11 +48,13 @@ async def _google_news_rss(symbol: str) -> list[dict]:
         items = root.findall(".//item")[:5]
         news = []
         for item in items:
-            title = item.findtext("title", "")
-            link  = item.findtext("link", "")
-            src   = item.findtext("source", "Google News")
+            title = item.findtext("title", "") or ""
+            link  = item.findtext("link", "") or ""
+            # source 標籤可能是元素物件，用 find 再取 text 避免 None
+            src_el = item.find("source")
+            src = (src_el.text if src_el is not None and src_el.text else "Google News")
             if title:
-                news.append({"title": title, "url": link, "publisher": src, "source": "Google News"})
+                news.append({"title": title, "url": link or "", "publisher": src, "source": "Google News"})
         return news
     except Exception as e:
         log.warning(f"Google News RSS {symbol} 失敗：{e}")
