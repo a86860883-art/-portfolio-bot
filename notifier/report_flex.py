@@ -644,13 +644,13 @@ def build_sentiment_flex(sentiment_data: dict) -> dict:
                      {"type": "box", "layout": "vertical",
                       "flex": bull_flex,
                       "backgroundColor": "#1D9E75",
-                      "cornerRadius": "7px 0px 0px 7px"
+                      "cornerRadius": "7px"
                       if bear_flex > 1 else "7px",
                       "contents": []},
                      {"type": "box", "layout": "vertical",
                       "flex": bear_flex,
                       "backgroundColor": "#E24B4A",
-                      "cornerRadius": "0px 7px 7px 0px"
+                      "cornerRadius": "7px"
                       if bull_flex > 1 else "7px",
                       "contents": []},
                  ]},
@@ -693,12 +693,12 @@ def build_sentiment_flex(sentiment_data: dict) -> dict:
                  {"type": "box", "layout": "vertical",
                   "flex": overall_pct,
                   "backgroundColor": "#1D9E75",
-                  "cornerRadius": "9px 0px 0px 9px",
+                  "cornerRadius": "9px",
                   "contents": []},
                  {"type": "box", "layout": "vertical",
                   "flex": max(1, 100 - overall_pct),
                   "backgroundColor": "#E24B4A",
-                  "cornerRadius": "0px 9px 9px 0px",
+                  "cornerRadius": "9px",
                   "contents": []},
              ]},
             {"type": "box", "layout": "horizontal",
