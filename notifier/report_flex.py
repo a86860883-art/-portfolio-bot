@@ -263,53 +263,53 @@ def build_stock_card(h: dict, t: dict) -> dict:
             "type": "box", "layout": "vertical",
             "paddingAll": "12px", "spacing": "sm",
             "contents": [
-                {"type": "box", "layout": "horizontal",
-                 "spacing": "sm", "contents": [
-                     {"type": "box", "layout": "vertical", "flex": 1,
-                      "backgroundColor": "#F7F7F7",
-                      "cornerRadius": "6px", "paddingAll": "8px",
-                      "contents": [
-                          {"type": "text", "text": "RSI",
-                           "size": "xxs", "color": "#888888"},
-                          {"type": "text", "text": rsi_s,
-                           "size": "lg", "weight": "bold",
-                           "color": "#E24B4A" if (isinstance(rsi, float) and rsi > 70)
-                                    else "#1D9E75" if (isinstance(rsi, float) and rsi < 30)
-                                    else "#111111"},
-                      ]},
-                     {"type": "box", "layout": "vertical", "flex": 1,
-                      "backgroundColor": "#F7F7F7",
-                      "cornerRadius": "6px", "paddingAll": "8px",
-                      "contents": [
-                          {"type": "text", "text": "布林帶",
-                           "size": "xxs", "color": "#888888"},
-                          {"type": "text", "text": bb_s,
-                           "size": "lg", "weight": "bold",
-                           "color": "#111111"},
-                      ]},
-                     {"type": "box", "layout": "vertical", "flex": 1,
-                      "backgroundColor": "#F7F7F7",
-                      "cornerRadius": "6px", "paddingAll": "8px",
-                      "contents": [
-                          {"type": "text", "text": "損益",
-                           "size": "xxs", "color": "#888888"},
-                          {"type": "text",
-                           "text": f"{pl_sign}{pl_pct:.1f}%",
-                           "size": "lg", "weight": "bold",
-                           "color": pl_color},
-                      ]},
-                     {"type": "box", "layout": "vertical", "flex": 1,
-                      "backgroundColor": "#F7F7F7",
-                      "cornerRadius": "6px", "paddingAll": "8px",
-                      "contents": [
-                          {"type": "text", "text": "距高點",
-                           "size": "xxs", "color": "#888888"},
-                          {"type": "text", "text": pct_s,
-                           "size": "lg", "weight": "bold",
-                           "color": "#E24B4A" if (isinstance(pct_h, float) and pct_h < -20)
-                                    else "#111111"},
-                      ]},
-                ]},
+        {"type": "box", "layout": "horizontal",
+         "spacing": "xs", "contents": [
+             {"type": "box", "layout": "vertical", "flex": 1,
+              "backgroundColor": "#F7F7F7",
+              "cornerRadius": "6px", "paddingAll": "8px",
+              "contents": [
+                  {"type": "text", "text": "RSI",
+                   "size": "xxs", "color": "#888888"},
+                  {"type": "text", "text": rsi_s,
+                   "size": "md", "weight": "bold",
+                   "color": "#E24B4A" if (isinstance(rsi, float) and rsi > 70)
+                            else "#1D9E75" if (isinstance(rsi, float) and rsi < 30)
+                            else "#111111"},
+              ]},
+             {"type": "box", "layout": "vertical", "flex": 1,
+              "backgroundColor": "#F7F7F7",
+              "cornerRadius": "6px", "paddingAll": "8px",
+              "contents": [
+                  {"type": "text", "text": "布林帶",
+                   "size": "xxs", "color": "#888888"},
+                  {"type": "text", "text": bb_s,
+                   "size": "md", "weight": "bold",
+                   "color": "#111111"},
+              ]},
+             {"type": "box", "layout": "vertical", "flex": 1,
+              "backgroundColor": "#F7F7F7",
+              "cornerRadius": "6px", "paddingAll": "8px",
+              "contents": [
+                  {"type": "text", "text": "損益%",
+                   "size": "xxs", "color": "#888888"},
+                  {"type": "text",
+                   "text": f"{pl_sign}{pl_pct:.1f}%",
+                   "size": "md", "weight": "bold",
+                   "color": pl_color},
+              ]},
+             {"type": "box", "layout": "vertical", "flex": 1,
+              "backgroundColor": "#F7F7F7",
+              "cornerRadius": "6px", "paddingAll": "8px",
+              "contents": [
+                  {"type": "text", "text": "距高點",
+                   "size": "xxs", "color": "#888888"},
+                  {"type": "text", "text": pct_s,
+                   "size": "md", "weight": "bold",
+                   "color": "#E24B4A" if (isinstance(pct_h, float) and pct_h < -20)
+                            else "#111111"},
+              ]},
+         ]},
                 {"type": "separator"},
                 *sig_contents,
                 *blind_box,
@@ -495,16 +495,19 @@ def build_news_flex(news_data: dict) -> dict:
     news_boxes = []
     for sym, title, summary, src in items:
         contents = [
-            # 股票標籤 + 來源
+            # 股票標籤 + 來源（用 box 包 text 實現背景色）
             {"type": "box", "layout": "horizontal",
              "spacing": "sm", "alignItems": "center",
              "contents": [
-                 {"type": "text", "text": sym,
-                  "size": "xxs", "color": "#FFFFFF",
+                 {"type": "box", "layout": "vertical",
                   "backgroundColor": "#534AB7",
                   "paddingStart": "6px", "paddingEnd": "6px",
                   "paddingTop": "3px", "paddingBottom": "3px",
-                  "flex": 0},
+                  "cornerRadius": "3px", "flex": 0,
+                  "contents": [
+                      {"type": "text", "text": sym,
+                       "size": "xxs", "color": "#FFFFFF"}
+                  ]},
                  {"type": "text", "text": src,
                   "size": "xxs", "color": "#888888"},
              ]},
