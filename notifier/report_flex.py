@@ -2,8 +2,10 @@
 兩階段報告 Flex Message 產生器
 第一階段：總覽燈號卡片
 第二階段：個股詳細分析卡片群
+持股圓餅圖：純 Flex Message 實作，不消耗額外 Token
 """
 import os
+import re
 import logging
 import httpx
 
@@ -11,6 +13,9 @@ log = logging.getLogger(__name__)
 
 PUSH_URL  = "https://api.line.me/v2/bot/message/push"
 REPLY_URL = "https://api.line.me/v2/bot/message/reply"
+
+COLORS = ["#534AB7","#1D9E75","#E24B4A","#185FA5","#BA7517",
+          "#D4537E","#0F6E56","#888780","#C07000","#3C3489"]
 
 
 def _headers():
@@ -20,55 +25,70 @@ def _headers():
     }
 
 
+def _clean_text(text: str, max_len: int = 60) -> str:
+    """清除特殊字元，確保 LINE API 接受"""
+    if not text:
+        return ""
+    # 移除控制字元和不安全字元
+    text = re.sub(r'[\x00-\x1f\x7f]', '', text)
+    text = text.replace('"', '"').replace("'", "'")
+    return text[:max_len].strip()
+
+
+def _clean_url(url: str) -> str:
+    """確保 URL 是有效的 https 連結"""
+    if not url:
+        return ""
+    url = url.strip()
+    if not url.startswith("http"):
+        return ""
+    # 移除有問題的字元
+    url = re.sub(r'[\s<>"\']', '', url)
+    return url[:500]
+
+
 def _signal(t: dict) -> tuple[str, str, str]:
-    """
-    根據技術指標回傳 (燈號顏色, 評級文字, 評級背景色)
-    """
     if not t or "error" in t:
         return "#888780", "無資料", "#F1EFE8"
-
-    rsi    = t.get("rsi", 50)
-    bb_pct = t.get("bb_pct", 50)
-    price  = t.get("price", 0)
-    ma50   = t.get("ma50", 0)
-    pct_h  = t.get("pct_from_high", 0)
-
+    rsi   = t.get("rsi", 50) or 50
+    bb    = t.get("bb_pct", 50) or 50
+    price = t.get("price", 0) or 0
+    ma50  = t.get("ma50", 0) or 0
+    pct_h = t.get("pct_from_high", 0) or 0
     score = 0
     if price and ma50 and price > ma50: score += 1
     if rsi < 70: score += 1
-    if bb_pct < 80: score += 1
+    if bb < 80: score += 1
     if pct_h > -20: score += 1
+    if score >= 3:   return "#1D9E75", "謹慎樂觀", "#E1F5EE"
+    elif score == 2: return "#BA7517", "中性觀察", "#FAEEDA"
+    else:            return "#E24B4A", "注意風險", "#FCEBEB"
 
-    if score >= 3:
-        return "#1D9E75", "謹慎樂觀", "#E1F5EE"
-    elif score == 2:
-        return "#BA7517", "中性觀察", "#FAEEDA"
-    else:
-        return "#E24B4A", "注意風險", "#FCEBEB"
 
+# ── 第一階段：總覽燈號 ──────────────────────────────
 
 def build_overview_flex(holdings: list, technicals: dict, date_str: str) -> dict:
-    """第一階段：總覽燈號卡片"""
-    total_mv = sum(h["market_value"] for h in holdings)
-    total_pl = sum(h["unrealized_pl"] for h in holdings)
+    total_mv  = sum(h["market_value"] for h in holdings)
+    total_pl  = sum(h["unrealized_pl"] for h in holdings)
     total_day = sum(h.get("day_change", 0) for h in holdings)
     pl_color  = "#1D9E75" if total_pl >= 0 else "#E24B4A"
     day_color = "#1D9E75" if total_day >= 0 else "#E24B4A"
     pl_sign   = "+" if total_pl >= 0 else ""
     day_sign  = "+" if total_day >= 0 else ""
-
-    red_count    = sum(1 for h in holdings if _signal(technicals.get(h["symbol"], {}))[0] == "#E24B4A")
-    yellow_count = sum(1 for h in holdings if _signal(technicals.get(h["symbol"], {}))[0] == "#BA7517")
+    red_cnt   = sum(1 for h in holdings
+                    if _signal(technicals.get(h["symbol"], {}))[0] == "#E24B4A")
+    yel_cnt   = sum(1 for h in holdings
+                    if _signal(technicals.get(h["symbol"], {}))[0] == "#BA7517")
 
     rows = []
     for h in sorted(holdings, key=lambda x: -x["market_value"]):
-        sym = h["symbol"]
-        t   = technicals.get(sym, {})
+        sym   = h["symbol"]
+        t     = technicals.get(sym, {})
         color, label, _ = _signal(t)
-        rsi = t.get("rsi", "--")
+        rsi   = t.get("rsi", "--")
+        rsi_s = f"{rsi:.1f}" if isinstance(rsi, float) else str(rsi)
         rows.append({
-            "type": "box",
-            "layout": "horizontal",
+            "type": "box", "layout": "horizontal",
             "contents": [
                 {"type": "box", "layout": "vertical",
                  "width": "8px", "backgroundColor": color,
@@ -76,18 +96,18 @@ def build_overview_flex(holdings: list, technicals: dict, date_str: str) -> dict
                 {"type": "box", "layout": "horizontal",
                  "paddingAll": "8px", "flex": 1,
                  "contents": [
-                     {"type": "text", "text": sym, "weight": "bold",
-                      "size": "sm", "color": "#111111", "flex": 2},
+                     {"type": "text", "text": sym,
+                      "weight": "bold", "size": "sm",
+                      "color": "#111111", "flex": 2},
                      {"type": "text", "text": label,
                       "size": "xs", "color": color, "flex": 3},
-                     {"type": "text", "text": f"RSI {rsi}",
+                     {"type": "text", "text": f"RSI {rsi_s}",
                       "size": "xs", "color": "#888888",
                       "align": "end", "flex": 2},
                  ]},
             ],
             "backgroundColor": "#FFFFFF",
-            "borderWidth": "0.5px",
-            "borderColor": "#F0F0F0",
+            "borderWidth": "0.5px", "borderColor": "#F0F0F0",
             "margin": "xs",
         })
 
@@ -99,16 +119,14 @@ def build_overview_flex(holdings: list, technicals: dict, date_str: str) -> dict
             "contents": [
                 {"type": "box", "layout": "horizontal", "contents": [
                     {"type": "text", "text": "持股健檢總覽",
-                     "weight": "bold", "size": "lg", "color": "#FFFFFF", "flex": 1},
+                     "weight": "bold", "size": "lg",
+                     "color": "#FFFFFF", "flex": 1},
                     {"type": "text", "text": date_str,
                      "size": "xs", "color": "#888888", "align": "end"},
                 ]},
-                {"type": "box", "layout": "horizontal",
-                 "margin": "sm", "contents": [
-                     {"type": "text",
-                      "text": f"🔴 {red_count} 注意  🟡 {yellow_count} 觀察  ⚫ {len(holdings)-red_count-yellow_count} 正常",
-                      "size": "xs", "color": "#AAAAAA"},
-                ]},
+                {"type": "text",
+                 "text": f"🔴 {red_cnt}檔注意  🟡 {yel_cnt}檔觀察  ✅ {len(holdings)-red_cnt-yel_cnt}檔正常",
+                 "size": "xs", "color": "#AAAAAA", "margin": "sm"},
             ]
         },
         "body": {
@@ -118,24 +136,30 @@ def build_overview_flex(holdings: list, technicals: dict, date_str: str) -> dict
                 {"type": "box", "layout": "horizontal",
                  "spacing": "sm", "contents": [
                      {"type": "box", "layout": "vertical", "flex": 1,
-                      "backgroundColor": "#F7F7F7", "cornerRadius": "8px",
-                      "paddingAll": "10px", "contents": [
-                          {"type": "text", "text": "總市值", "size": "xs", "color": "#888888"},
+                      "backgroundColor": "#F7F7F7",
+                      "cornerRadius": "8px", "paddingAll": "10px",
+                      "contents": [
+                          {"type": "text", "text": "總市值",
+                           "size": "xs", "color": "#888888"},
                           {"type": "text", "text": f"${total_mv:,.0f}",
                            "size": "md", "weight": "bold", "color": "#111111"},
                       ]},
                      {"type": "box", "layout": "vertical", "flex": 1,
-                      "backgroundColor": "#F7F7F7", "cornerRadius": "8px",
-                      "paddingAll": "10px", "contents": [
-                          {"type": "text", "text": "未實現損益", "size": "xs", "color": "#888888"},
+                      "backgroundColor": "#F7F7F7",
+                      "cornerRadius": "8px", "paddingAll": "10px",
+                      "contents": [
+                          {"type": "text", "text": "未實現損益",
+                           "size": "xs", "color": "#888888"},
                           {"type": "text",
                            "text": f"{pl_sign}${abs(total_pl):,.0f}",
                            "size": "md", "weight": "bold", "color": pl_color},
                       ]},
                      {"type": "box", "layout": "vertical", "flex": 1,
-                      "backgroundColor": "#F7F7F7", "cornerRadius": "8px",
-                      "paddingAll": "10px", "contents": [
-                          {"type": "text", "text": "今日損益", "size": "xs", "color": "#888888"},
+                      "backgroundColor": "#F7F7F7",
+                      "cornerRadius": "8px", "paddingAll": "10px",
+                      "contents": [
+                          {"type": "text", "text": "今日損益",
+                           "size": "xs", "color": "#888888"},
                           {"type": "text",
                            "text": f"{day_sign}${abs(total_day):,.0f}",
                            "size": "md", "weight": "bold", "color": day_color},
@@ -167,43 +191,48 @@ def build_overview_flex(holdings: list, technicals: dict, date_str: str) -> dict
     }
 
 
+# ── 第二階段：個股卡片 ──────────────────────────────
+
 def build_stock_card(h: dict, t: dict) -> dict:
-    """單一股票詳細分析卡片"""
-    sym   = h["symbol"]
-    color, label, bg = _signal(t)
-    price = t.get("price", h.get("price", 0))
-    rsi   = t.get("rsi", "--")
-    bb    = t.get("bb_pct", "--")
-    pct_h = t.get("pct_from_high", "--")
-    sigs  = t.get("signals", [])
-    mv    = h.get("market_value", 0)
-    pl    = h.get("unrealized_pl", 0)
-    qty   = h.get("quantity", 0)
-    pl_pct = pl / (mv - pl) * 100 if (mv - pl) != 0 else 0
-    pl_sign = "+" if pl >= 0 else ""
+    sym      = h["symbol"]
+    color, label, _ = _signal(t)
+    price    = t.get("price") or h.get("price", 0)
+    rsi      = t.get("rsi", "--")
+    bb       = t.get("bb_pct", "--")
+    pct_h    = t.get("pct_from_high", "--")
+    sigs     = t.get("signals", [])
+    mv       = h.get("market_value", 0)
+    pl       = h.get("unrealized_pl", 0)
+    qty      = h.get("quantity", 0)
+    cost     = mv - pl
+    pl_pct   = pl / cost * 100 if cost > 0 else 0
+    pl_sign  = "+" if pl >= 0 else ""
     pl_color = "#1D9E75" if pl >= 0 else "#E24B4A"
+    rsi_s    = f"{rsi:.1f}" if isinstance(rsi, float) else str(rsi)
+    bb_s     = f"{bb:.0f}%" if isinstance(bb, float) else str(bb)
+    pct_s    = f"{pct_h:.1f}%" if isinstance(pct_h, float) else str(pct_h)
+    price_s  = f"${price:.2f}" if isinstance(price, float) else f"${price}"
 
-    from BLIND_SPOTS_DATA import BLIND_SPOTS
-    blind = BLIND_SPOTS.get(sym, "")
+    try:
+        from BLIND_SPOTS_DATA import BLIND_SPOTS
+        blind = BLIND_SPOTS.get(sym, "")
+    except Exception:
+        blind = ""
 
-    sig_contents = []
-    for s in sigs[:3]:
-        sig_contents.append({
-            "type": "text", "text": f"• {s}",
-            "size": "xs", "color": "#555555", "wrap": True
-        })
-
-    blind_box = []
-    if blind:
-        blind_box = [{
-            "type": "box", "layout": "horizontal",
-            "backgroundColor": "#FAEEDA", "paddingAll": "8px",
-            "cornerRadius": "4px",
-            "contents": [
-                {"type": "text", "text": f"⚠ {blind}",
-                 "size": "xxs", "color": "#633806", "wrap": True}
-            ]
-        }]
+    sig_contents = [
+        {"type": "text", "text": f"• {s}",
+         "size": "xs", "color": "#555555", "wrap": True}
+        for s in sigs[:3]
+    ]
+    blind_box = [{
+        "type": "box", "layout": "horizontal",
+        "backgroundColor": "#FFF3CD", "paddingAll": "8px",
+        "cornerRadius": "6px", "margin": "sm",
+        "contents": [
+            {"type": "text", "text": f"⚠ {blind}",
+             "size": "xxs", "color": "#856404", "wrap": True}
+        ]
+    }] if blind else []
 
     return {
         "type": "bubble",
@@ -216,13 +245,13 @@ def build_stock_card(h: dict, t: dict) -> dict:
                      {"type": "text", "text": sym,
                       "weight": "bold", "size": "xl", "color": "#FFFFFF"},
                      {"type": "text",
-                      "text": f"${price}  ·  {qty:.0f}股  ·  ${mv:,.0f}",
+                      "text": f"{price_s}  {qty:.0f}股  ${mv:,.0f}",
                       "size": "xs", "color": "#FFFFFF"},
                  ]},
                 {"type": "box", "layout": "vertical",
-                 "backgroundColor": "#FFFFFF20",
-                 "cornerRadius": "99px",
-                 "paddingAll": "6px",
+                 "backgroundColor": "#FFFFFF30",
+                 "cornerRadius": "99px", "paddingAll": "6px",
+                 "justifyContent": "center",
                  "contents": [
                      {"type": "text", "text": label,
                       "size": "xs", "color": "#FFFFFF",
@@ -237,26 +266,31 @@ def build_stock_card(h: dict, t: dict) -> dict:
                 {"type": "box", "layout": "horizontal",
                  "spacing": "sm", "contents": [
                      {"type": "box", "layout": "vertical", "flex": 1,
-                      "backgroundColor": "#F7F7F7", "cornerRadius": "6px",
-                      "paddingAll": "8px", "contents": [
+                      "backgroundColor": "#F7F7F7",
+                      "cornerRadius": "6px", "paddingAll": "8px",
+                      "contents": [
                           {"type": "text", "text": "RSI",
                            "size": "xxs", "color": "#888888"},
-                          {"type": "text", "text": str(rsi),
+                          {"type": "text", "text": rsi_s,
                            "size": "lg", "weight": "bold",
-                           "color": "#E24B4A" if (isinstance(rsi, float) and rsi > 70) else
-                                    "#1D9E75" if (isinstance(rsi, float) and rsi < 30) else "#111111"},
+                           "color": "#E24B4A" if (isinstance(rsi, float) and rsi > 70)
+                                    else "#1D9E75" if (isinstance(rsi, float) and rsi < 30)
+                                    else "#111111"},
                       ]},
                      {"type": "box", "layout": "vertical", "flex": 1,
-                      "backgroundColor": "#F7F7F7", "cornerRadius": "6px",
-                      "paddingAll": "8px", "contents": [
+                      "backgroundColor": "#F7F7F7",
+                      "cornerRadius": "6px", "paddingAll": "8px",
+                      "contents": [
                           {"type": "text", "text": "布林帶",
                            "size": "xxs", "color": "#888888"},
-                          {"type": "text", "text": f"{bb}%",
-                           "size": "lg", "weight": "bold", "color": "#111111"},
+                          {"type": "text", "text": bb_s,
+                           "size": "lg", "weight": "bold",
+                           "color": "#111111"},
                       ]},
                      {"type": "box", "layout": "vertical", "flex": 1,
-                      "backgroundColor": "#F7F7F7", "cornerRadius": "6px",
-                      "paddingAll": "8px", "contents": [
+                      "backgroundColor": "#F7F7F7",
+                      "cornerRadius": "6px", "paddingAll": "8px",
+                      "contents": [
                           {"type": "text", "text": "損益",
                            "size": "xxs", "color": "#888888"},
                           {"type": "text",
@@ -264,7 +298,18 @@ def build_stock_card(h: dict, t: dict) -> dict:
                            "size": "lg", "weight": "bold",
                            "color": pl_color},
                       ]},
-                 ]},
+                     {"type": "box", "layout": "vertical", "flex": 1,
+                      "backgroundColor": "#F7F7F7",
+                      "cornerRadius": "6px", "paddingAll": "8px",
+                      "contents": [
+                          {"type": "text", "text": "距高點",
+                           "size": "xxs", "color": "#888888"},
+                          {"type": "text", "text": pct_s,
+                           "size": "lg", "weight": "bold",
+                           "color": "#E24B4A" if (isinstance(pct_h, float) and pct_h < -20)
+                                    else "#111111"},
+                      ]},
+                ]},
                 {"type": "separator"},
                 *sig_contents,
                 *blind_box,
@@ -274,59 +319,213 @@ def build_stock_card(h: dict, t: dict) -> dict:
 
 
 def build_detail_carousel(holdings: list, technicals: dict) -> dict:
-    """第二階段：個股卡片輪播（Carousel）"""
-    # 優先顯示紅燈和黃燈
     def priority(h):
-        color, _, _ = _signal(technicals.get(h["symbol"], {}))
-        return {" #E24B4A": 0, "#BA7517": 1}.get(color, 2)
-
+        c, _, _ = _signal(technicals.get(h["symbol"], {}))
+        return {"#E24B4A": 0, "#BA7517": 1}.get(c, 2)
     sorted_h = sorted(holdings, key=priority)
     bubbles  = [build_stock_card(h, technicals.get(h["symbol"], {}))
                 for h in sorted_h[:10]]
-
     return {"type": "carousel", "contents": bubbles}
 
 
+# ── 持股分布圓餅圖 ──────────────────────────────────
+
+def build_holdings_pie_flex(holdings: list) -> dict:
+    """
+    用 Flex Message 製作持股分布圓餅圖
+    完全不需要 AI，零額外 Token 消耗
+    """
+    total = sum(h["market_value"] for h in holdings)
+    if total == 0:
+        return {"type": "bubble",
+                "body": {"type": "box", "layout": "vertical",
+                         "contents": [{"type": "text",
+                                       "text": "尚無持股資料"}]}}
+
+    # 按市值排序，前8檔獨立顯示，其餘合併
+    sorted_h = sorted(holdings, key=lambda x: -x["market_value"])
+    top8     = sorted_h[:8]
+    others   = sorted_h[8:]
+
+    items = []
+    for i, h in enumerate(top8):
+        pct = h["market_value"] / total * 100
+        items.append({
+            "sym":   h["symbol"],
+            "mv":    h["market_value"],
+            "pl":    h["unrealized_pl"],
+            "pct":   pct,
+            "color": COLORS[i % len(COLORS)],
+        })
+    if others:
+        other_mv = sum(h["market_value"] for h in others)
+        items.append({
+            "sym":   "其他",
+            "mv":    other_mv,
+            "pl":    sum(h["unrealized_pl"] for h in others),
+            "pct":   other_mv / total * 100,
+            "color": "#CCCCCC",
+        })
+
+    total_pl   = sum(h["unrealized_pl"] for h in holdings)
+    pl_sign    = "+" if total_pl >= 0 else ""
+    pl_color   = "#1D9E75" if total_pl >= 0 else "#E24B4A"
+
+    # 用進度條模擬圓餅圖（LINE Flex 不支援真正的圓餅，但進度條視覺效果佳）
+    bar_contents = []
+    for item in items:
+        pct_w = max(1, int(item["pct"]))
+        pl_s  = "+" if item["pl"] >= 0 else ""
+        pl_c  = "#1D9E75" if item["pl"] >= 0 else "#E24B4A"
+        bar_contents.append({
+            "type": "box", "layout": "vertical",
+            "margin": "sm",
+            "contents": [
+                {"type": "box", "layout": "horizontal",
+                 "contents": [
+                     {"type": "box", "layout": "vertical",
+                      "width": "12px", "height": "12px",
+                      "backgroundColor": item["color"],
+                      "cornerRadius": "2px",
+                      "contents": [], "margin": "none"},
+                     {"type": "text", "text": item["sym"],
+                      "size": "sm", "weight": "bold",
+                      "color": "#111111", "flex": 2, "margin": "sm"},
+                     {"type": "text",
+                      "text": f"${item['mv']:,.0f}",
+                      "size": "sm", "color": "#555555",
+                      "flex": 3, "align": "end"},
+                     {"type": "text",
+                      "text": f"{item['pct']:.1f}%",
+                      "size": "sm", "color": "#888888",
+                      "flex": 1, "align": "end"},
+                 ], "alignItems": "center"},
+                # 進度條
+                {"type": "box", "layout": "horizontal",
+                 "height": "8px", "margin": "xs",
+                 "backgroundColor": "#F0F0F0",
+                 "cornerRadius": "4px",
+                 "contents": [
+                     {"type": "box", "layout": "vertical",
+                      "flex": pct_w,
+                      "backgroundColor": item["color"],
+                      "cornerRadius": "4px",
+                      "contents": []},
+                     {"type": "filler",
+                      "flex": max(1, 100 - pct_w)},
+                 ]},
+                # 損益小標
+                {"type": "text",
+                 "text": f"損益 {pl_s}${abs(item['pl']):,.0f}",
+                 "size": "xxs", "color": pl_c,
+                 "margin": "xs"},
+            ]
+        })
+
+    return {
+        "type": "bubble", "size": "giga",
+        "header": {
+            "type": "box", "layout": "vertical",
+            "backgroundColor": "#111111", "paddingAll": "14px",
+            "contents": [
+                {"type": "text", "text": "持股分布",
+                 "weight": "bold", "size": "lg", "color": "#FFFFFF"},
+                {"type": "box", "layout": "horizontal",
+                 "margin": "sm", "contents": [
+                     {"type": "text",
+                      "text": f"總市值 ${total:,.0f}",
+                      "size": "sm", "color": "#CCCCCC", "flex": 1},
+                     {"type": "text",
+                      "text": f"損益 {pl_sign}${abs(total_pl):,.0f}",
+                      "size": "sm", "color": pl_color,
+                      "align": "end"},
+                 ]},
+            ]
+        },
+        "body": {
+            "type": "box", "layout": "vertical",
+            "paddingAll": "14px", "spacing": "none",
+            "contents": bar_contents,
+        }
+    }
+
+
+# ── 重點新聞 ────────────────────────────────────────
+
 def build_news_flex(news_data: dict) -> dict:
-    """重點新聞 Flex Message"""
+    """重點新聞 Flex Message，嚴格清理內容避免 400 錯誤"""
     items = []
     seen  = set()
+
     for sym, news_list in news_data.items():
+        if not isinstance(news_list, list):
+            continue
         for n in news_list:
-            title = (n.get("title") or "")[:60]
-            url   = n.get("url") or ""
-            src   = n.get("source") or n.get("publisher") or "新聞"
-            if title and title not in seen and url:
-                seen.add(title)
-                items.append((sym, title, src, url))
+            if not isinstance(n, dict):
+                continue
+            raw_title = n.get("title") or n.get("headline") or ""
+            raw_url   = n.get("url") or n.get("link") or ""
+            raw_src   = n.get("source") or n.get("publisher") or "新聞"
+
+            title = _clean_text(raw_title, 55)
+            url   = _clean_url(raw_url)
+            src   = _clean_text(str(raw_src), 20)
+
+            if not title or title in seen:
+                continue
+            if not url:
+                continue
+
+            seen.add(title)
+            items.append((sym, title, src, url))
             if len(items) >= 5:
                 break
         if len(items) >= 5:
             break
 
-    contents = []
+    if not items:
+        return {
+            "type": "bubble", "size": "giga",
+            "body": {
+                "type": "box", "layout": "vertical",
+                "paddingAll": "20px",
+                "contents": [
+                    {"type": "text", "text": "持股重點新聞",
+                     "weight": "bold", "size": "lg", "color": "#111111"},
+                    {"type": "text", "text": "目前無最新新聞資料",
+                     "size": "sm", "color": "#888888", "margin": "md"},
+                ]
+            }
+        }
+
+    news_boxes = []
     for sym, title, src, url in items:
-        contents.append({
+        news_boxes.append({
             "type": "box", "layout": "vertical",
-            "paddingAll": "10px",
-            "backgroundColor": "#FAFAFA",
+            "margin": "md",
+            "paddingAll": "12px",
+            "backgroundColor": "#F8F8F8",
             "cornerRadius": "8px",
-            "action": {"type": "uri", "label": "查看", "uri": url},
+            "action": {"type": "uri", "label": "查看全文", "uri": url},
             "contents": [
                 {"type": "box", "layout": "horizontal",
+                 "spacing": "sm",
                  "contents": [
                      {"type": "text", "text": sym,
                       "size": "xxs", "color": "#FFFFFF",
                       "backgroundColor": "#534AB7",
-                      "paddingAll": "3px",
+                      "paddingStart": "6px", "paddingEnd": "6px",
+                      "paddingTop": "2px", "paddingBottom": "2px",
                       "flex": 0},
                      {"type": "text", "text": src,
-                      "size": "xxs", "color": "#888888",
-                      "margin": "sm"},
+                      "size": "xxs", "color": "#888888"},
                  ]},
                 {"type": "text", "text": title,
                  "size": "sm", "color": "#111111",
-                 "wrap": True, "margin": "sm"},
+                 "wrap": True, "margin": "sm",
+                 "maxLines": 3},
+                {"type": "text", "text": "點擊查看全文 →",
+                 "size": "xxs", "color": "#185FA5", "margin": "sm"},
             ]
         })
 
@@ -344,35 +543,41 @@ def build_news_flex(news_data: dict) -> dict:
         },
         "body": {
             "type": "box", "layout": "vertical",
-            "paddingAll": "12px", "spacing": "sm",
-            "contents": contents if contents else [
-                {"type": "text", "text": "目前無最新新聞",
-                 "size": "sm", "color": "#888888", "align": "center"}
-            ]
+            "paddingAll": "12px",
+            "contents": news_boxes,
         }
     }
 
 
+# ── 推播函式 ────────────────────────────────────────
+
 async def push_flex(flex: dict, alt: str):
-    """主動推播 Flex Message"""
     user_id = os.environ["LINE_USER_ID"]
+    # alt text 也要清理
+    alt = _clean_text(alt, 100) or "通知"
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
             PUSH_URL, headers=_headers(),
             json={"to": user_id,
-                  "messages": [{"type": "flex", "altText": alt,
+                  "messages": [{"type": "flex",
+                                "altText": alt,
                                 "contents": flex}]}
         )
+        if resp.status_code != 200:
+            log.error(f"push_flex 失敗 {resp.status_code}: {resp.text[:300]}")
         resp.raise_for_status()
 
 
 async def reply_flex(reply_token: str, flex: dict, alt: str):
-    """回覆式推播"""
+    alt = _clean_text(alt, 100) or "通知"
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
             REPLY_URL, headers=_headers(),
             json={"replyToken": reply_token,
-                  "messages": [{"type": "flex", "altText": alt,
+                  "messages": [{"type": "flex",
+                                "altText": alt,
                                 "contents": flex}]}
         )
+        if resp.status_code != 200:
+            log.error(f"reply_flex 失敗 {resp.status_code}: {resp.text[:300]}")
         resp.raise_for_status()

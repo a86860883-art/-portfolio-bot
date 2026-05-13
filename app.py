@@ -20,7 +20,8 @@ from sources.sec_edgar import get_filings
 from notifier.line_push import push_report, push_text, reply_text
 from notifier.report_flex import (
     build_overview_flex, build_detail_carousel,
-    build_news_flex, push_flex, reply_flex
+    build_news_flex, build_holdings_pie_flex,
+    push_flex, reply_flex
 )
 
 log = logging.getLogger(__name__)
@@ -311,7 +312,12 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             background_tasks.add_task(process_news_background)
 
         elif text in ("/holdings", "我的持股", "持股"):
-            await reply_text(reply_token, await cmd_holdings())
+            holdings = load_holdings()
+            if not holdings:
+                await reply_text(reply_token, "尚無持股資料，請上傳嘉信 CSV 檔案")
+            else:
+                flex = build_holdings_pie_flex(holdings)
+                await reply_flex(reply_token, flex, "持股分布")
 
         elif text in ("/sentiment", "社群情緒", "情緒"):
             await reply_text(reply_token, await cmd_sentiment())
