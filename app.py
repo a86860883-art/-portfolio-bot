@@ -5,7 +5,7 @@ import asyncio, hashlib, hmac, base64, json, logging, os
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 import httpx
 
 from scheduler.daily import create_scheduler
@@ -16,7 +16,7 @@ from analyzers.ai_summary import generate_report
 from sources.stocktwits import get_sentiment
 from sources.news import get_news
 from sources.sec_edgar import get_filings
-from notifier.line_push import push_report, reply_text, reply_flex
+from notifier.line_push import push_report, push_text, reply_text
 from notifier.dashboard import send_dashboard
 
 log = logging.getLogger(__name__)
@@ -71,9 +71,8 @@ async def ask_claude(user_id: str, message: str) -> str:
                 "model": "claude-sonnet-4-20250514",
                 "max_tokens": 1024,
                 "system": (
-                    "你是一個專業的美股持股健檢助理，專精於 TSLA、NVDA、GOOGL、MU、INTC 等科技股。"
+                    "你是一個專業的美股持股健檢助理，專精於科技股分析。"
                     "用繁體中文回答，簡潔易讀。只提供資訊分析，非投資建議。"
-                    "回答時可主動提示該股的技術分析盲點。"
                 ),
                 "messages": history,
             },
@@ -84,13 +83,68 @@ async def ask_claude(user_id: str, message: str) -> str:
     return reply
 
 
+# ── 背景任務：辨識截圖後用 push 推播結果 ──────────────
+async def process_screenshot_background(msg_id: str):
+    """在背景執行辨識，完成後用主動推播回傳結果，繞過 LINE 30 秒限制"""
+    try:
+        img = await download_image(msg_id)
+        holdings = await extract_holdings_from_image(img, "image/jpeg")
+
+        if not holdings:
+            await push_text(
+                "截圖辨識失敗，請確認：\n"
+                "1. 截圖是嘉信持股頁面\n"
+                "2. 文字清晰無遮擋\n"
+                "3. 建議放大後再截圖\n\n"
+                "支援 App 截圖與網頁版截圖"
+            )
+            return
+
+        save_holdings(holdings)
+        total = sum(h["market_value"] for h in holdings)
+        lines = [f"辨識成功！更新了 {len(holdings)} 筆持股\n"]
+        for h in sorted(holdings, key=lambda x: -x["market_value"]):
+            sign = "▲" if h["unrealized_pl"] >= 0 else "▼"
+            lines.append(
+                f"{h['symbol']:<6} {h['quantity']:>6,.0f} 股"
+                f"  ${h['market_value']:>8,.0f}"
+                f"  {sign}${abs(h['unrealized_pl']):,.0f}"
+            )
+        lines += [f"\n總市值：${total:,.0f}", "傳 /report 可立即產生健檢報告"]
+        await push_text("\n".join(lines))
+
+    except Exception as e:
+        log.error(f"背景辨識失敗：{e}")
+        await push_text(f"辨識過程發生錯誤，請重新傳送截圖。\n（{type(e).__name__}）")
+
+
+async def process_report_background():
+    """在背景產生報告，完成後用 push 推播"""
+    try:
+        holdings = load_holdings()
+        if not holdings:
+            await push_text("尚無持股資料，請先傳送截圖")
+            return
+        tickers = [h["symbol"] for h in holdings]
+        t, s, n, f = await asyncio.gather(
+            analyze_technicals(tickers),
+            get_sentiment(tickers),
+            get_news(tickers),
+            get_filings(tickers),
+        )
+        await push_report(await generate_report(holdings, t, s, n, f))
+    except Exception as e:
+        log.error(f"背景報告失敗：{e}")
+        await push_text(f"報告產生失敗，請稍後重試。\n（{type(e).__name__}）")
+
+
 HELP_TEXT = """📊 持股健檢 Bot 使用說明
 
 【更新持股資料】
 直接傳送截圖給我：
  - 嘉信 App 持股頁面截圖
  - 嘉信網頁版截圖
-Bot 會自動辨識並更新持股資料
+Bot 辨識完成後會自動推播結果
 
 【指令】
 /menu      互動儀表板
@@ -106,40 +160,6 @@ Bot 會自動辨識並更新持股資料
 「NVDA 目前技術面如何？」
 
 每日凌晨 5:30 自動推播健檢報告"""
-
-
-async def handle_screenshot(reply_token: str, msg_id: str):
-    await reply_text(reply_token, "辨識截圖中，請稍候...")
-    try:
-        img = await download_image(msg_id)
-    except Exception as e:
-        await reply_text(reply_token, f"圖片下載失敗：{e}\n請重新傳送")
-        return
-
-    holdings = await extract_holdings_from_image(img, "image/jpeg")
-    if not holdings:
-        await reply_text(
-            reply_token,
-            "辨識失敗，請確認：\n"
-            "1. 截圖是嘉信持股頁面\n"
-            "2. 文字清晰無遮擋\n"
-            "3. 建議放大後再截圖\n\n"
-            "支援 App 截圖與網頁版截圖"
-        )
-        return
-
-    save_holdings(holdings)
-    total = sum(h["market_value"] for h in holdings)
-    lines = [f"辨識成功！更新了 {len(holdings)} 筆持股\n"]
-    for h in sorted(holdings, key=lambda x: -x["market_value"]):
-        sign = "▲" if h["unrealized_pl"] >= 0 else "▼"
-        lines.append(
-            f"{h['symbol']:<6} {h['quantity']:>6,.0f} 股"
-            f"  ${h['market_value']:>8,.0f}"
-            f"  {sign}${abs(h['unrealized_pl']):,.0f}"
-        )
-    lines += [f"\n總市值：${total:,.0f}", "傳 /report 可立即產生健檢報告"]
-    await reply_text(reply_token, "\n".join(lines))
 
 
 async def cmd_holdings() -> str:
@@ -168,7 +188,7 @@ async def cmd_technical() -> str:
     lines = ["技術分析訊號\n" + "─" * 24]
     for sym, t in tech.items():
         if "error" in t:
-            lines.append(f"{sym}：分析失敗（{t['error']}）")
+            lines.append(f"{sym}：分析失敗")
             continue
         sig = "、".join(t.get("signals", [])[:2]) or "無明顯訊號"
         above = "站上" if t["price"] > t["ma50"] else "跌破"
@@ -192,7 +212,7 @@ async def cmd_sentiment() -> str:
 
 
 @app.post("/webhook")
-async def webhook(request: Request):
+async def webhook(request: Request, background_tasks: BackgroundTasks):
     body = await request.body()
     sig  = request.headers.get("X-Line-Signature", "")
     if not verify_sig(body, sig):
@@ -207,8 +227,11 @@ async def webhook(request: Request):
         msg_type    = event["message"].get("type")
         reply_token = event["replyToken"]
 
+        # 截圖：立刻回覆「辨識中」，背景執行辨識後 push 結果
         if msg_type == "image":
-            await handle_screenshot(reply_token, event["message"]["id"])
+            msg_id = event["message"]["id"]
+            await reply_text(reply_token, "辨識截圖中，完成後會推播結果給你...")
+            background_tasks.add_task(process_screenshot_background, msg_id)
             continue
 
         if msg_type != "text":
@@ -230,19 +253,8 @@ async def webhook(request: Request):
             await reply_text(reply_token, await cmd_holdings())
 
         elif text in ("/report", "健檢", "報告"):
-            await reply_text(reply_token, "產生報告中，約需 30 秒...")
-            holdings = load_holdings()
-            if holdings:
-                tickers = [h["symbol"] for h in holdings]
-                t, s, n, f = await asyncio.gather(
-                    analyze_technicals(tickers),
-                    get_sentiment(tickers),
-                    get_news(tickers),
-                    get_filings(tickers),
-                )
-                await push_report(await generate_report(holdings, t, s, n, f))
-            else:
-                await reply_text(reply_token, "尚無持股資料，請先傳送截圖")
+            await reply_text(reply_token, "報告產生中，完成後會推播給你（約 30 秒）...")
+            background_tasks.add_task(process_report_background)
 
         elif text in ("/technical", "技術分析", "技術訊號"):
             await reply_text(reply_token, await cmd_technical())
