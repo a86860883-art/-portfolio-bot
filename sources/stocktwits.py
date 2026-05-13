@@ -21,21 +21,28 @@ async def _fetch_ticker(client: httpx.AsyncClient, symbol: str) -> dict:
         )
         if resp.status_code == 429:
             log.warning(f"StockTwits rate limit，跳過 {symbol}")
-            return {"symbol": symbol, "bullish": 0, "bearish": 0, "messages": []}
+            return {"symbol": symbol, "bullish": 0, "bearish": 0, "total": 0, "score": 0, "messages": []}
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
         log.warning(f"StockTwits {symbol} 失敗：{e}")
-        return {"symbol": symbol, "bullish": 0, "bearish": 0, "messages": []}
+        return {"symbol": symbol, "bullish": 0, "bearish": 0, "total": 0, "score": 0, "messages": []}
 
-    messages = data.get("messages", [])
-    bullish = sum(1 for m in messages if m.get("entities", {}).get("sentiment", {}).get("basic") == "Bullish")
-    bearish = sum(1 for m in messages if m.get("entities", {}).get("sentiment", {}).get("basic") == "Bearish")
+    # 過濾掉 None 元素
+    messages = [m for m in (data.get("messages") or []) if m is not None]
 
-    # 取前 3 則有內容的訊息
+    bullish = sum(
+        1 for m in messages
+        if (m.get("entities") or {}).get("sentiment", {}).get("basic") == "Bullish"
+    )
+    bearish = sum(
+        1 for m in messages
+        if (m.get("entities") or {}).get("sentiment", {}).get("basic") == "Bearish"
+    )
+
     top_msgs = [
         m["body"][:120] for m in messages
-        if m.get("body") and len(m["body"]) > 20
+        if m.get("body") and len(m.get("body", "")) > 20
     ][:3]
 
     return {
@@ -53,7 +60,6 @@ async def get_sentiment(tickers: list[str]) -> dict[str, dict]:
     回傳每個 ticker 的情緒摘要
     { "AAPL": { bullish, bearish, score, messages }, ... }
     """
-    # 避免觸發 rate limit，每次請求間隔 0.5 秒
     async with httpx.AsyncClient() as client:
         results = {}
         for ticker in tickers:
