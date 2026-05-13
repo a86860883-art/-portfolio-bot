@@ -21,7 +21,7 @@ from notifier.line_push import push_report, push_text, reply_text
 from notifier.report_flex import (
     build_overview_flex, build_detail_carousel,
     build_news_flex, build_holdings_pie_flex,
-    push_flex, reply_flex
+    build_sentiment_flex, push_flex, reply_flex
 )
 
 log = logging.getLogger(__name__)
@@ -131,6 +131,23 @@ async def process_detail_background():
     except Exception as e:
         log.error(f"個股分析失敗：{e}", exc_info=True)
         await push_text(f"個股分析失敗：{e}")
+
+
+async def process_sentiment_background():
+    """社群情緒條狀圖推播"""
+    try:
+        holdings = load_holdings()
+        if not holdings:
+            await push_text("尚無持股資料，請先上傳 CSV")
+            return
+        tickers  = [h["symbol"] for h in holdings]
+        sentiment = await get_sentiment(tickers)
+        flex = build_sentiment_flex(sentiment)
+        await push_flex(flex, "社群情緒分析")
+        log.info("情緒條狀圖推播完成")
+    except Exception as e:
+        log.error(f"情緒推播失敗：{e}", exc_info=True)
+        await push_text(f"社群情緒取得失敗：{e}")
 
 
 async def process_news_background():
@@ -320,7 +337,8 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 await reply_flex(reply_token, flex, "持股分布")
 
         elif text in ("/sentiment", "社群情緒", "情緒"):
-            await reply_text(reply_token, await cmd_sentiment())
+            await reply_text(reply_token, "蒐集社群情緒中，完成後推播...")
+            background_tasks.add_task(process_sentiment_background)
 
         elif text in ("/help", "help", "使用說明", "說明", "?"):
             await reply_text(reply_token, HELP_TEXT)
