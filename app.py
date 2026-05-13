@@ -16,6 +16,7 @@ from analyzers.ai_summary import generate_report
 from sources.stocktwits import get_sentiment
 from sources.news import get_news
 from sources.sec_edgar import get_filings
+from sources.csv_import import parse_schwab_csv_bytes
 from notifier.line_push import push_report, push_text, reply_text
 from notifier.dashboard import send_dashboard
 
@@ -46,7 +47,52 @@ def verify_sig(body: bytes, sig: str) -> bool:
     return hmac.compare_digest(base64.b64encode(digest).decode(), sig)
 
 
-async def download_image(msg_id: str) -> bytes:
+async def download_file(msg_id: str) -> bytes:
+    """下載 LINE 傳來的檔案（CSV 等）"""
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.get(
+            f"https://api-data.line.me/v2/bot/message/{msg_id}/content",
+            headers={"Authorization": f"Bearer {LINE_TOKEN}"},
+        )
+        resp.raise_for_status()
+        return resp.content
+
+
+async def handle_csv(reply_token: str, msg_id: str, filename: str = ""):
+    """處理嘉信 CSV 持倉明細"""
+    try:
+        data     = await download_file(msg_id)
+        holdings = parse_schwab_csv_bytes(data)
+    except Exception as e:
+        await reply_text(reply_token, f"CSV 讀取失敗：{e}")
+        return
+
+    if not holdings:
+        await reply_text(
+            reply_token,
+            "CSV 解析失敗，請確認是嘉信的持倉明細 CSV\n"
+            "（網頁版 → Positions → Export）"
+        )
+        return
+
+    save_holdings(holdings, source="csv")
+    total  = sum(h["market_value"] for h in holdings)
+    pl     = sum(h["unrealized_pl"] for h in holdings)
+    pl_sign = "+" if pl >= 0 else ""
+    lines  = [f"CSV 匯入成功！共 {len(holdings)} 筆持股\n"]
+    for h in sorted(holdings, key=lambda x: -x["market_value"]):
+        sign = "▲" if h["unrealized_pl"] >= 0 else "▼"
+        lines.append(
+            f"{h['symbol']:<6} {h['quantity']:>6,.0f} 股"
+            f"  ${h['market_value']:>9,.0f}"
+            f"  {sign}${abs(h['unrealized_pl']):,.0f}"
+        )
+    lines += [
+        f"\n總市值：${total:,.0f}",
+        f"總損益：{pl_sign}${abs(pl):,.0f}",
+        "傳 /report 可立即產生健檢報告",
+    ]
+    await reply_text(reply_token, "\n".join(lines))
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(
             f"https://api-data.line.me/v2/bot/message/{msg_id}/content",
@@ -231,6 +277,16 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         user_id     = event["source"]["userId"]
         msg_type    = event["message"].get("type")
         reply_token = event["replyToken"]
+
+        if msg_type == "file":
+            msg_id   = event["message"]["id"]
+            filename = event["message"].get("fileName", "")
+            if filename.lower().endswith(".csv"):
+                await reply_text(reply_token, "讀取 CSV 中，請稍候...")
+                await handle_csv(reply_token, msg_id, filename)
+            else:
+                await reply_text(reply_token, "請上傳嘉信的 CSV 持倉明細（.csv 格式）")
+            continue
 
         if msg_type == "image":
             msg_id = event["message"]["id"]
