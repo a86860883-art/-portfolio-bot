@@ -57,49 +57,46 @@ async def download_image(msg_id: str) -> bytes:
 
 
 async def ask_claude(user_id: str, message: str) -> str:
-    """使用 Gemini 回覆聊天問題"""
-    api_key = os.environ["GEMINI_API_KEY"]
     history = conversation_histories.setdefault(user_id, [])
-    history.append({"role": "user", "parts": [{"text": message}]})
+    history.append({"role": "user", "content": message})
     if len(history) > 20:
         history[:] = history[-20:]
-
-    system = (
-        "你是一個專業的美股持股健檢助理，專精於科技股分析。"
-        "用繁體中文回答，簡潔易讀。只提供資訊分析，非投資建議。"
-    )
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
-    payload = {
-        "system_instruction": {"parts": [{"text": system}]},
-        "contents": history,
-        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024}
-    }
     async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.post(url, json=payload)
+        resp = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTH_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": "claude-haiku-4-5-20251001",
+                "max_tokens": 1024,
+                "system": (
+                    "你是一個專業的美股持股健檢助理，專精於科技股分析。"
+                    "用繁體中文回答，簡潔易讀。只提供資訊分析，非投資建議。"
+                ),
+                "messages": history,
+            },
+        )
         resp.raise_for_status()
-
-    reply = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-    history.append({"role": "model", "parts": [{"text": reply}]})
+    reply = resp.json()["content"][0]["text"]
+    history.append({"role": "assistant", "content": reply})
     return reply
 
 
-# ── 背景任務：辨識截圖後用 push 推播結果 ──────────────
 async def process_screenshot_background(msg_id: str):
-    """在背景執行辨識，完成後用主動推播回傳結果，繞過 LINE 30 秒限制"""
     try:
-        img = await download_image(msg_id)
+        img      = await download_image(msg_id)
         holdings = await extract_holdings_from_image(img, "image/jpeg")
-
         if not holdings:
             await push_text(
                 "截圖辨識失敗，請確認：\n"
                 "1. 截圖是嘉信持股頁面\n"
                 "2. 文字清晰無遮擋\n"
-                "3. 建議放大後再截圖\n\n"
-                "支援 App 截圖與網頁版截圖"
+                "3. 建議放大後再截圖"
             )
             return
-
         save_holdings(holdings)
         total = sum(h["market_value"] for h in holdings)
         lines = [f"辨識成功！更新了 {len(holdings)} 筆持股\n"]
@@ -112,14 +109,12 @@ async def process_screenshot_background(msg_id: str):
             )
         lines += [f"\n總市值：${total:,.0f}", "傳 /report 可立即產生健檢報告"]
         await push_text("\n".join(lines))
-
     except Exception as e:
         log.error(f"背景辨識失敗：{e}")
         await push_text(f"辨識過程發生錯誤，請重新傳送截圖。\n（{type(e).__name__}）")
 
 
 async def process_report_background():
-    """在背景產生報告，完成後用 push 推播"""
     try:
         holdings = load_holdings()
         if not holdings:
@@ -190,7 +185,7 @@ async def cmd_technical() -> str:
         if "error" in t:
             lines.append(f"{sym}：分析失敗")
             continue
-        sig = "、".join(t.get("signals", [])[:2]) or "無明顯訊號"
+        sig   = "、".join(t.get("signals", [])[:2]) or "無明顯訊號"
         above = "站上" if t["price"] > t["ma50"] else "跌破"
         lines.append(f"{sym}  ${t['price']}  RSI {t['rsi']}  {above} MA50\n  {sig}")
     return "\n".join(lines)
@@ -200,7 +195,7 @@ async def cmd_sentiment() -> str:
     holdings = load_holdings()
     if not holdings:
         return "尚無持股資料，請先傳送截圖"
-    sent = await get_sentiment([h["symbol"] for h in holdings])
+    sent  = await get_sentiment([h["symbol"] for h in holdings])
     lines = ["社群情緒（StockTwits）\n" + "─" * 24]
     for sym, s in sent.items():
         if not s.get("total"):
@@ -227,7 +222,6 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         msg_type    = event["message"].get("type")
         reply_token = event["replyToken"]
 
-        # 截圖：立刻回覆「辨識中」，背景執行辨識後 push 結果
         if msg_type == "image":
             msg_id = event["message"]["id"]
             await reply_text(reply_token, "辨識截圖中，完成後會推播結果給你...")
@@ -284,6 +278,27 @@ async def health():
     return {"status": "running", "time": datetime.now().isoformat()}
 
 
-# ── 匯入並掛載測試路由 ──
-from test_api import router as test_router
-app.include_router(test_router)
+@app.get("/test")
+async def test_api():
+    """測試 Anthropic API 連線"""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": ANTH_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 10,
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            )
+        if resp.status_code == 200:
+            return {"anthropic": "SUCCESS - 可以連線"}
+        else:
+            return {"anthropic": f"FAIL - HTTP {resp.status_code}", "detail": resp.text[:200]}
+    except Exception as e:
+        return {"anthropic": f"FAIL - {type(e).__name__}: {str(e)[:200]}"}

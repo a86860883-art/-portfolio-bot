@@ -1,49 +1,63 @@
 """
-截圖辨識模組 - Claude Vision 從嘉信 App / 網頁版截圖提取持股
+截圖辨識模組 - 使用 Claude Vision (Anthropic)
 """
-import base64
-import json
-import logging
-import os
-import re
+import base64, io, json, logging, os, re
 from pathlib import Path
 import httpx
 
 log = logging.getLogger(__name__)
 
 VISION_PROMPT = """
-你是金融數據辨識專家。請分析這張嘉信證券（Charles Schwab）截圖，
-可能來自手機 App 或網頁版，提取所有持股資訊。
-
-以 JSON 格式回傳（只回傳 JSON，不要其他文字）：
+你是金融數據辨識專家。請分析這張嘉信證券截圖，提取所有持股資訊。
+只回傳 JSON，不要其他文字：
 {
   "holdings": [
     {
-      "symbol": "股票代號（大寫，如 AAPL）",
+      "symbol": "股票代號（大寫）",
       "quantity": 持股數量,
-      "market_value": 市值（美元數字）,
-      "cost_basis": 平均成本價（美元數字）,
-      "unrealized_pl": 未實現損益（正數獲利負數虧損）,
-      "unrealized_pl_pct": 損益百分比（數字）
+      "market_value": 市值,
+      "cost_basis": 平均成本價,
+      "unrealized_pl": 未實現損益,
+      "unrealized_pl_pct": 損益百分比
     }
   ],
-  "total_market_value": 總市值或null,
-  "cash": 現金餘額或null,
   "confidence": "high/medium/low",
-  "notes": "無法辨識的欄位說明"
+  "notes": "備註"
 }
-
-規則：數字不含 $、,、% 符號。看不到的欄位設為 null。
-股票代號一律大寫。若不是持股頁面，holdings 回傳空陣列。
+數字不含$、,、%。看不到設null。非持股頁面holdings回傳空陣列。
 """
+
+MAX_BYTES = 4 * 1024 * 1024
+
+
+def _compress(data: bytes) -> tuple[bytes, str]:
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(data))
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        for q in [85, 70, 55, 40]:
+            out = io.BytesIO()
+            img.save(out, format="JPEG", quality=q)
+            c = out.getvalue()
+            if len(c) <= MAX_BYTES:
+                return c, "image/jpeg"
+        w, h = img.size
+        img = img.resize((w//2, h//2))
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=60)
+        return out.getvalue(), "image/jpeg"
+    except ImportError:
+        return data, "image/jpeg"
 
 
 async def extract_holdings_from_image(image_data: bytes, media_type: str = "image/jpeg") -> list[dict]:
-    """使用 Claude Vision 從截圖提取持股，回傳標準格式 list"""
     api_key = os.environ["ANTHROPIC_API_KEY"]
+    image_data, media_type = _compress(image_data)
     b64 = base64.standard_b64encode(image_data).decode()
+    log.info(f"圖片：{len(image_data)//1024}KB")
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(
             "https://api.anthropic.com/v1/messages",
             headers={
@@ -52,7 +66,7 @@ async def extract_holdings_from_image(image_data: bytes, media_type: str = "imag
                 "content-type": "application/json",
             },
             json={
-                "model": "claude-sonnet-4-20250514",
+                "model": "claude-haiku-4-5-20251001",
                 "max_tokens": 1024,
                 "messages": [{
                     "role": "user",
@@ -64,6 +78,8 @@ async def extract_holdings_from_image(image_data: bytes, media_type: str = "imag
                 }],
             },
         )
+        if resp.status_code != 200:
+            log.error(f"Anthropic 錯誤 {resp.status_code}：{resp.text[:300]}")
         resp.raise_for_status()
 
     raw = resp.json()["content"][0]["text"].strip()
@@ -73,15 +89,11 @@ async def extract_holdings_from_image(image_data: bytes, media_type: str = "imag
     try:
         result = json.loads(raw)
     except json.JSONDecodeError as e:
-        log.error(f"Vision JSON 解析失敗：{e}")
+        log.error(f"JSON 解析失敗：{e}")
         return []
 
-    raw_holdings = result.get("holdings", [])
-    confidence   = result.get("confidence", "unknown")
-    notes        = result.get("notes", "")
-    if notes:
-        log.info(f"Vision 備註：{notes}")
-    log.info(f"辨識完成，信心度：{confidence}，持股：{len(raw_holdings)} 筆")
+    raw_h = result.get("holdings", [])
+    log.info(f"辨識完成：{result.get('confidence')}，{len(raw_h)} 筆")
 
     def sf(v, d=0.0):
         try: return float(v) if v is not None else d
@@ -95,17 +107,7 @@ async def extract_holdings_from_image(image_data: bytes, media_type: str = "imag
             "cost_basis":    sf(h.get("cost_basis")),
             "unrealized_pl": sf(h.get("unrealized_pl")),
             "source":        "screenshot",
-            "confidence":    confidence,
+            "confidence":    result.get("confidence", "unknown"),
         }
-        for h in raw_holdings if h.get("symbol")
+        for h in raw_h if h.get("symbol")
     ]
-
-
-async def extract_from_file(path: str) -> list[dict]:
-    """從本機圖片檔案提取持股（測試用）"""
-    p = Path(path)
-    ext = p.suffix.lower()
-    media_map = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-                 ".png": "image/png", ".webp": "image/webp"}
-    return await extract_holdings_from_image(
-        p.read_bytes(), media_map.get(ext, "image/jpeg"))
