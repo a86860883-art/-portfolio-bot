@@ -215,8 +215,10 @@ async def process_report_background():
         await push_report(report)
         log.info("報告推播完成")
     except AttributeError as e:
-        log.error(f"報告 AttributeError：{e}", exc_info=True)
-        await push_text(f"報告產生失敗（資料格式問題）：{e}\n請重試或傳送新截圖更新持股資料")
+        import traceback
+        tb = traceback.format_exc()
+        log.error(f"報告 AttributeError：{e}\n{tb}")
+        await push_text(f"報告產生失敗（資料格式問題）：{e}\n\n詳細位置：\n{tb[-300:]}")
     except Exception as e:
         log.error(f"報告失敗：{type(e).__name__}: {e}", exc_info=True)
         await push_text(f"報告產生失敗，請稍後重試。\n（{type(e).__name__}: {str(e)[:100]}）")

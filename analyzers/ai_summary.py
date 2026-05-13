@@ -22,10 +22,18 @@ def _build_prompt(holdings, technicals, sentiment, news, filings) -> str:
     lines = [f"今天是 {today}，請用繁體中文產生持股健檢報告。\n"]
     for h in holdings:
         sym = h["symbol"]
-        t = technicals.get(sym, {})
-        s = sentiment.get(sym, {})
-        n = news.get(sym, [])
-        f = filings.get(sym, [])
+        t = technicals.get(sym) if technicals else {}
+        s = sentiment.get(sym) if sentiment else {}
+        n = news.get(sym) if news else []
+        f = filings.get(sym) if filings else []
+
+        # 防呆：確保都是正確型別
+        if t is None: t = {}
+        if s is None: s = {}
+        if n is None: n = []
+        if f is None: f = []
+
+        log.info(f"{sym} t={type(t)} s={type(s)} n={type(n)} f={type(f)}")
         lines.append(f"## {sym}")
         lines.append(f"持股：{h['quantity']:,.0f} 股，市值 ${h['market_value']:,.0f}，成本 ${h['cost_basis']:.2f}，損益 ${h['unrealized_pl']:,.0f}")
         if "error" not in t and t:
