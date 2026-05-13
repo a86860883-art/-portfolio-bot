@@ -453,7 +453,7 @@ def build_holdings_pie_flex(holdings: list) -> dict:
 # ── 重點新聞 ────────────────────────────────────────
 
 def build_news_flex(news_data: dict) -> dict:
-    """重點新聞 Flex Message，嚴格清理內容避免 400 錯誤"""
+    """重點新聞 Flex Message：中文標題 + 精華摘要，無連結"""
     items = []
     seen  = set()
 
@@ -463,21 +463,15 @@ def build_news_flex(news_data: dict) -> dict:
         for n in news_list:
             if not isinstance(n, dict):
                 continue
-            raw_title = n.get("title") or n.get("headline") or ""
-            raw_url   = n.get("url") or n.get("link") or ""
-            raw_src   = n.get("source") or n.get("publisher") or "新聞"
-
-            title = _clean_text(raw_title, 55)
-            url   = _clean_url(raw_url)
-            src   = _clean_text(str(raw_src), 20)
+            # 優先用中文標題，沒有就用原文
+            title   = _clean_text(n.get("title_zh") or n.get("title") or "", 50)
+            summary = _clean_text(n.get("summary_zh") or "", 100)
+            src     = _clean_text(n.get("source") or n.get("publisher") or "新聞", 20)
 
             if not title or title in seen:
                 continue
-            if not url:
-                continue
-
             seen.add(title)
-            items.append((sym, title, src, url))
+            items.append((sym, title, summary, src))
             if len(items) >= 5:
                 break
         if len(items) >= 5:
@@ -491,7 +485,7 @@ def build_news_flex(news_data: dict) -> dict:
                 "paddingAll": "20px",
                 "contents": [
                     {"type": "text", "text": "持股重點新聞",
-                     "weight": "bold", "size": "lg", "color": "#111111"},
+                     "weight": "bold", "size": "lg"},
                     {"type": "text", "text": "目前無最新新聞資料",
                      "size": "sm", "color": "#888888", "margin": "md"},
                 ]
@@ -499,34 +493,42 @@ def build_news_flex(news_data: dict) -> dict:
         }
 
     news_boxes = []
-    for sym, title, src, url in items:
+    for sym, title, summary, src in items:
+        contents = [
+            # 股票標籤 + 來源
+            {"type": "box", "layout": "horizontal",
+             "spacing": "sm", "alignItems": "center",
+             "contents": [
+                 {"type": "text", "text": sym,
+                  "size": "xxs", "color": "#FFFFFF",
+                  "backgroundColor": "#534AB7",
+                  "paddingStart": "6px", "paddingEnd": "6px",
+                  "paddingTop": "3px", "paddingBottom": "3px",
+                  "flex": 0},
+                 {"type": "text", "text": src,
+                  "size": "xxs", "color": "#888888"},
+             ]},
+            # 中文標題
+            {"type": "text", "text": title,
+             "size": "sm", "weight": "bold",
+             "color": "#111111", "wrap": True,
+             "margin": "sm", "maxLines": 2},
+        ]
+        # 有摘要就顯示
+        if summary:
+            contents.append({
+                "type": "text", "text": summary,
+                "size": "xs", "color": "#555555",
+                "wrap": True, "margin": "sm",
+                "maxLines": 4,
+            })
+
         news_boxes.append({
             "type": "box", "layout": "vertical",
-            "margin": "md",
-            "paddingAll": "12px",
+            "margin": "md", "paddingAll": "12px",
             "backgroundColor": "#F8F8F8",
             "cornerRadius": "8px",
-            "action": {"type": "uri", "label": "查看全文", "uri": url},
-            "contents": [
-                {"type": "box", "layout": "horizontal",
-                 "spacing": "sm",
-                 "contents": [
-                     {"type": "text", "text": sym,
-                      "size": "xxs", "color": "#FFFFFF",
-                      "backgroundColor": "#534AB7",
-                      "paddingStart": "6px", "paddingEnd": "6px",
-                      "paddingTop": "2px", "paddingBottom": "2px",
-                      "flex": 0},
-                     {"type": "text", "text": src,
-                      "size": "xxs", "color": "#888888"},
-                 ]},
-                {"type": "text", "text": title,
-                 "size": "sm", "color": "#111111",
-                 "wrap": True, "margin": "sm",
-                 "maxLines": 3},
-                {"type": "text", "text": "點擊查看全文 →",
-                 "size": "xxs", "color": "#185FA5", "margin": "sm"},
-            ]
+            "contents": contents,
         })
 
     return {
@@ -535,9 +537,9 @@ def build_news_flex(news_data: dict) -> dict:
             "type": "box", "layout": "vertical",
             "backgroundColor": "#111111", "paddingAll": "14px",
             "contents": [
-                {"type": "text", "text": "持股重點新聞",
+                {"type": "text", "text": "🗞 持股重點新聞",
                  "weight": "bold", "size": "lg", "color": "#FFFFFF"},
-                {"type": "text", "text": "點擊新聞可查看全文",
+                {"type": "text", "text": "AI 中文摘要 · 不含連結",
                  "size": "xs", "color": "#888888", "margin": "xs"},
             ]
         },
