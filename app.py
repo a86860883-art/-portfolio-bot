@@ -58,6 +58,42 @@ async def download_file(msg_id: str) -> bytes:
         return resp.content
 
 
+async def handle_csv_background(msg_id: str, filename: str = ""):
+    """背景處理 CSV，完成後用 push 推播結果"""
+    try:
+        data     = await download_file(msg_id)
+        holdings = parse_schwab_csv_bytes(data)
+    except Exception as e:
+        await push_text(f"CSV 讀取失敗：{e}")
+        return
+
+    if not holdings:
+        await push_text(
+            "CSV 解析失敗，請確認是嘉信的持倉明細 CSV\n"
+            "（網頁版 → Positions → Export）"
+        )
+        return
+
+    save_holdings(holdings, source="csv")
+    total   = sum(h["market_value"] for h in holdings)
+    pl      = sum(h["unrealized_pl"] for h in holdings)
+    pl_sign = "+" if pl >= 0 else ""
+    lines   = [f"CSV 匯入成功！共 {len(holdings)} 筆持股\n"]
+    for h in sorted(holdings, key=lambda x: -x["market_value"]):
+        sign = "▲" if h["unrealized_pl"] >= 0 else "▼"
+        lines.append(
+            f"{h['symbol']:<6} {h['quantity']:>6,.0f} 股"
+            f"  ${h['market_value']:>9,.0f}"
+            f"  {sign}${abs(h['unrealized_pl']):,.0f}"
+        )
+    lines += [
+        f"\n總市值：${total:,.0f}",
+        f"總損益：{pl_sign}${abs(pl):,.0f}",
+        "傳 /report 可立即產生健檢報告",
+    ]
+    await push_text("\n".join(lines))
+
+
 async def handle_csv(reply_token: str, msg_id: str, filename: str = ""):
     """處理嘉信 CSV 持倉明細"""
     try:
@@ -282,8 +318,8 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             msg_id   = event["message"]["id"]
             filename = event["message"].get("fileName", "")
             if filename.lower().endswith(".csv"):
-                await reply_text(reply_token, "讀取 CSV 中，請稍候...")
-                await handle_csv(reply_token, msg_id, filename)
+                await reply_text(reply_token, "讀取 CSV 中，完成後會推播結果給你...")
+                background_tasks.add_task(handle_csv_background, msg_id, filename)
             else:
                 await reply_text(reply_token, "請上傳嘉信的 CSV 持倉明細（.csv 格式）")
             continue

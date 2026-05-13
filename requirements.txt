@@ -7,3 +7,4 @@ ta
 APScheduler==3.10.4
 pytz==2024.2
 python-dotenv==1.0.1
+Pillow==10.4.0
