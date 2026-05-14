@@ -13,12 +13,12 @@ import httpx
 log = logging.getLogger(__name__)
 
 BALANCE_PROMPT = """
-請分析這張嘉信證券（Charles Schwab）帳戶總結或餘額截圖，提取以下資訊。
+請分析這張嘉信證券帳戶截圖，可能來自嘉信主 App、Thinkorswim App 或網頁版，提取帳戶資訊。
 
 只回傳 JSON，不要其他文字：
 {
-  "net_value": 帳戶淨值或淨清倉價值（數字，美元）,
-  "margin_balance": 融資餘額借款金額（正數，美元，若無融資則為0）,
+  "net_value": 帳戶淨值（數字，美元）,
+  "margin_balance": 融資借款金額（正數，美元，若無融資則為0）,
   "total_market_value": 持股總市值（數字，美元）,
   "available_cash": 可用資金（數字，美元）,
   "margin_equity_pct": 淨資產百分比（數字，如72.00）,
@@ -27,12 +27,26 @@ BALANCE_PROMPT = """
   "notes": "備註"
 }
 
-欄位對應說明：
-- 淨清倉價值 / 融資淨資產 / 倉位淨資產 → net_value
-- 融資餘額（括號表示負數，即借款）→ margin_balance（取絕對值）
-- 買入股票價值 / 持股市值 → total_market_value
-- 可用於交易的資金 / 可用$ → available_cash
+各 App 欄位對應說明：
+
+【嘉信主 App / 帳戶總結】
+- 融資淨資產 / 淨清倉價值 → net_value
+- 融資餘額（括號表示負數）→ margin_balance（取絕對值）
+- 買入股票價值 / 買入可融資價值 → total_market_value
+- 可用於交易的資金 → available_cash
 - 淨資產百分比 → margin_equity_pct
+- 維持保證金要求 → maintenance_requirement
+
+【Thinkorswim App】
+- 淨清倉值 / 倉位淨資產 / 淨清倉價值 → net_value
+- 若有負數現金或融資欄位 → margin_balance
+- 開倉盈虧 + 淨清倉值可推算市值 → total_market_value
+- 可用$ → available_cash
+
+【計算說明】
+- 括號金額（$57,041.47）代表負數，融資借款取絕對值
+- 若截圖只有淨清倉值和可用資金，margin_balance 設為 0
+- total_market_value 若看不到，用 net_value + margin_balance 估算
 
 數字不含 $、,、% 符號。看不到的欄位設為 null。
 """

@@ -41,7 +41,7 @@ RICH_MENU_DEF = {
         },
         {
             "bounds": {"x": 1666, "y": 421, "width": 834, "height": 422},
-            "action": {"type": "message", "text": "/help"}
+            "action": {"type": "message", "text": "/balance"}
         },
     ]
 }

@@ -197,6 +197,45 @@ async def process_screenshot_background(msg_id: str):
         await push_text(f"辨識失敗：{type(e).__name__}")
 
 
+async def process_auto_detect_screenshot(msg_id: str):
+    """
+    自動判斷截圖類型：
+    - 有淨清倉值/融資欄位 → 帳戶總結截圖
+    - 有股票代號/持股列表 → 持股截圖
+    """
+    try:
+        img = await download_file(msg_id)
+
+        # 先試帳戶辨識
+        balance = await extract_balance_from_image(img)
+        if balance and balance.get("net_value", 0) > 0:
+            # 成功辨識為帳戶截圖
+            save_balance(balance)
+            await push_flex(build_balance_success_flex(balance), "帳戶資訊已更新")
+            return
+
+        # 再試持股辨識
+        holdings = await extract_holdings_from_image(img, "image/jpeg")
+        if holdings:
+            save_holdings(holdings)
+            await push_flex(
+                build_success_flex(f"截圖辨識成功！{len(holdings)} 筆持股",
+                                   holdings, "按下方按鈕開始健檢"),
+                "持股辨識完成")
+            return
+
+        # 兩者都失敗
+        await push_text(
+            "截圖辨識失敗，請確認截圖內容：\n\n"
+            "📋 持股清單截圖 → 直接傳送\n"
+            "🏦 帳戶總結截圖 → 點選單「更新帳戶」再傳\n\n"
+            "建議截圖時放大頁面，確保文字清晰"
+        )
+    except Exception as e:
+        log.error(f"自動辨識失敗：{e}", exc_info=True)
+        await push_text(f"辨識失敗：{type(e).__name__}")
+
+
 async def process_balance_screenshot_background(msg_id: str):
     """帳戶總結截圖辨識"""
     try:
@@ -261,7 +300,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 await reply_text(reply_token, "請上傳嘉信 CSV 持倉明細（.csv 格式）")
             continue
 
-        # 圖片
+        # 圖片 - 自動判斷是持股截圖還是帳戶截圖
         if msg_type == "image":
             mode   = _pending_image_mode.pop(user_id, None)
             msg_id = event["message"]["id"]
@@ -270,9 +309,10 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 background_tasks.add_task(
                     process_balance_screenshot_background, msg_id)
             else:
+                # 自動判斷：先試帳戶截圖辨識，若失敗改持股辨識
                 await reply_text(reply_token, "辨識截圖中，完成後推播結果...")
                 background_tasks.add_task(
-                    process_screenshot_background, msg_id)
+                    process_auto_detect_screenshot, msg_id)
             continue
 
         if msg_type != "text":
