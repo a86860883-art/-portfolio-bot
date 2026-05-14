@@ -6,10 +6,13 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
+from fastapi.responses import Response
 import httpx
 
 from scheduler.daily import create_scheduler
 from sources.screenshot_ocr import extract_holdings_from_image
+from sources.balance_ocr import extract_balance_from_image
+from sources.balance_store import save_balance, load_balance, calc_leverage
 from sources.holdings_store import save_holdings, load_holdings, get_holdings_status
 from sources.csv_import import parse_schwab_csv_bytes
 from analyzers.technical import analyze_technicals
@@ -22,14 +25,13 @@ from notifier.report_flex import (
     build_overview_flex, build_detail_carousel,
     build_news_flex, build_holdings_pie_flex,
     build_sentiment_flex, build_success_flex,
+    build_balance_success_flex,
     build_status_flex, build_help_flex, build_clear_flex,
     push_flex, reply_flex
 )
 from notifier.chart_image import (
-    generate_pie_chart, push_pie_chart,
-    reply_pie_chart, _chart_cache
+    generate_pie_chart, push_pie_chart, _chart_cache
 )
-from fastapi.responses import Response
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO,
@@ -41,6 +43,9 @@ ANTH_KEY    = os.environ["ANTHROPIC_API_KEY"]
 
 conversation_histories: dict[str, list] = {}
 _last_technicals: dict = {}
+
+# 辨識模式旗標：None=一般截圖, "balance"=帳戶截圖
+_pending_image_mode: dict[str, str] = {}
 
 
 @asynccontextmanager
@@ -81,15 +86,10 @@ async def ask_claude(user_id: str, message: str) -> str:
             headers={"x-api-key": ANTH_KEY,
                      "anthropic-version": "2023-06-01",
                      "content-type": "application/json"},
-            json={
-                "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 1024,
-                "system": (
-                    "你是一個專業的美股持股健檢助理，專精科技股分析。"
-                    "用繁體中文回答，簡潔易讀，非投資建議。"
-                ),
-                "messages": history,
-            },
+            json={"model": "claude-haiku-4-5-20251001", "max_tokens": 1024,
+                  "system": ("你是專業美股持股健檢助理，專精科技股分析。"
+                             "用繁體中文回答，簡潔易讀，非投資建議。"),
+                  "messages": history},
         )
         resp.raise_for_status()
     reply = resp.json()["content"][0]["text"]
@@ -97,7 +97,7 @@ async def ask_claude(user_id: str, message: str) -> str:
     return reply
 
 
-# ── 背景任務 ──────────────────────────────────────
+# ── 背景任務 ──────────────────────────────────────────
 
 async def process_overview_background():
     global _last_technicals
@@ -108,8 +108,11 @@ async def process_overview_background():
             return
         technicals = await analyze_technicals([h["symbol"] for h in holdings])
         _last_technicals = technicals
-        today = datetime.now().strftime("%Y/%m/%d")
-        await push_flex(build_overview_flex(holdings, technicals, today), "持股健檢總覽")
+        balance = load_balance()
+        today   = datetime.now().strftime("%Y/%m/%d")
+        await push_flex(
+            build_overview_flex(holdings, technicals, today, balance),
+            "持股健檢總覽")
     except Exception as e:
         log.error(f"總覽失敗：{e}", exc_info=True)
         await push_text(f"總覽產生失敗：{type(e).__name__}")
@@ -143,20 +146,21 @@ async def process_news_background():
             await push_flex(build_news_flex(news), "持股重點新聞")
         except Exception as flex_err:
             log.warning(f"新聞 Flex 失敗，改文字：{flex_err}")
-            lines = ["🗞 持股重點新聞\n"]
-            seen  = set()
-            for sym, news_list in news.items():
-                for n in (news_list or []):
-                    t = (n.get("title_zh") or n.get("title") or "")[:50].strip()
-                    s = (n.get("summary_zh") or "")[:80].strip()
-                    if t and t not in seen:
-                        seen.add(t)
-                        lines.append(f"[{sym}] {t}")
-                        if s: lines.append(f"  {s}")
-                        lines.append("")
-                    if len(seen) >= 5: break
-                if len(seen) >= 5: break
-            await push_text("\n".join(lines) if seen else "目前無最新新聞")
+            market = news.get("market", []) if isinstance(news, dict) else []
+            stocks = news.get("stocks", news) if isinstance(news, dict) else news
+            lines  = ["🗞 重大市場新聞\n"]
+            for n in market[:3]:
+                t = (n.get("title_zh") or n.get("title") or "")[:45]
+                s = (n.get("summary_zh") or "")[:70]
+                if t: lines.append(f"• {t}\n  {s}\n")
+            lines.append("\n📌 持股相關新聞\n")
+            seen = set()
+            for n in stocks[:5]:
+                t = (n.get("title_zh") or n.get("title") or "")[:45]
+                if t and t not in seen:
+                    seen.add(t)
+                    lines.append(f"• [{n.get('symbol','')}] {t}\n")
+            await push_text("\n".join(lines))
     except Exception as e:
         log.error(f"新聞失敗：{e}", exc_info=True)
         await push_text(f"新聞取得失敗：{type(e).__name__}")
@@ -176,6 +180,7 @@ async def process_sentiment_background():
 
 
 async def process_screenshot_background(msg_id: str):
+    """持股截圖辨識"""
     try:
         img      = await download_file(msg_id)
         holdings = await extract_holdings_from_image(img, "image/jpeg")
@@ -186,11 +191,28 @@ async def process_screenshot_background(msg_id: str):
         await push_flex(
             build_success_flex(f"截圖辨識成功！{len(holdings)} 筆持股",
                                holdings, "按下方按鈕開始健檢"),
-            "持股辨識完成"
-        )
+            "持股辨識完成")
     except Exception as e:
         log.error(f"截圖辨識失敗：{e}", exc_info=True)
         await push_text(f"辨識失敗：{type(e).__name__}")
+
+
+async def process_balance_screenshot_background(msg_id: str):
+    """帳戶總結截圖辨識"""
+    try:
+        img     = await download_file(msg_id)
+        balance = await extract_balance_from_image(img)
+        if not balance or balance.get("net_value", 0) == 0:
+            await push_text(
+                "帳戶資訊辨識失敗，請確認截圖是嘉信「帳戶總結」或「餘額」頁面\n"
+                "需包含：淨清倉價值、融資餘額等欄位"
+            )
+            return
+        save_balance(balance)
+        await push_flex(build_balance_success_flex(balance), "帳戶資訊已更新")
+    except Exception as e:
+        log.error(f"帳戶截圖辨識失敗：{e}", exc_info=True)
+        await push_text(f"帳戶資訊辨識失敗：{type(e).__name__}")
 
 
 async def handle_csv_background(msg_id: str):
@@ -204,33 +226,13 @@ async def handle_csv_background(msg_id: str):
         await push_flex(
             build_success_flex(f"CSV 匯入成功！{len(holdings)} 筆持股",
                                holdings, "按下方按鈕開始健檢"),
-            "持股更新完成"
-        )
+            "持股更新完成")
     except Exception as e:
         log.error(f"CSV 失敗：{e}", exc_info=True)
         await push_text(f"CSV 讀取失敗：{type(e).__name__}")
 
 
-async def process_report_background():
-    """舊版文字報告（保留備用）"""
-    try:
-        holdings = load_holdings()
-        if not holdings:
-            await push_text("尚無持股資料")
-            return
-        tickers = [h["symbol"] for h in holdings]
-        t, s, n, f = await asyncio.gather(
-            analyze_technicals(tickers), get_sentiment(tickers),
-            get_news(tickers), get_filings(tickers),
-        )
-        from notifier.line_push import push_report
-        await push_report(await generate_report(holdings, t, s, n, f))
-    except Exception as e:
-        log.error(f"報告失敗：{e}", exc_info=True)
-        await push_text(f"報告產生失敗：{type(e).__name__}")
-
-
-# ── Webhook ───────────────────────────────────────
+# ── Webhook ───────────────────────────────────────────
 
 @app.post("/webhook")
 async def webhook(request: Request, background_tasks: BackgroundTasks):
@@ -259,11 +261,18 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
                 await reply_text(reply_token, "請上傳嘉信 CSV 持倉明細（.csv 格式）")
             continue
 
-        # 截圖
+        # 圖片
         if msg_type == "image":
-            await reply_text(reply_token, "辨識截圖中，完成後推播結果...")
-            background_tasks.add_task(
-                process_screenshot_background, event["message"]["id"])
+            mode   = _pending_image_mode.pop(user_id, None)
+            msg_id = event["message"]["id"]
+            if mode == "balance":
+                await reply_text(reply_token, "辨識帳戶資訊中，完成後推播結果...")
+                background_tasks.add_task(
+                    process_balance_screenshot_background, msg_id)
+            else:
+                await reply_text(reply_token, "辨識截圖中，完成後推播結果...")
+                background_tasks.add_task(
+                    process_screenshot_background, msg_id)
             continue
 
         if msg_type != "text":
@@ -273,6 +282,12 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
         if text in ("/help", "help", "使用說明", "說明", "?"):
             await reply_flex(reply_token, build_help_flex(), "使用說明")
+
+        elif text in ("/balance", "帳戶資訊", "更新帳戶"):
+            _pending_image_mode[user_id] = "balance"
+            await reply_text(reply_token,
+                "請傳送嘉信 App「帳戶總結」頁面的截圖\n"
+                "需包含：淨清倉價值、融資餘額、可用資金等欄位")
 
         elif text in ("/overview", "/report", "今日總覽", "健檢", "報告"):
             await reply_text(reply_token, "分析中，完成後推播總覽...")
@@ -289,24 +304,20 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         elif text in ("/holdings", "我的持股", "持股"):
             holdings = load_holdings()
             if not holdings:
-                await reply_text(reply_token,
-                    "尚無持股資料，請上傳嘉信 CSV 檔案")
+                await reply_text(reply_token, "尚無持股資料，請上傳嘉信 CSV 檔案")
             else:
-                # 先回覆條狀圖 Flex
+                balance = load_balance()
                 await reply_flex(reply_token,
-                    build_holdings_pie_flex(holdings), "持股分布")
-                # 背景推播真正的圓餅圖圖片
-                import asyncio as _asyncio
-                _asyncio.create_task(push_pie_chart(holdings))
+                    build_holdings_pie_flex(holdings, balance), "持股分布")
+                asyncio.create_task(push_pie_chart(holdings))
 
         elif text in ("/sentiment", "社群情緒", "情緒"):
             await reply_text(reply_token, "蒐集社群情緒中，完成後推播...")
             background_tasks.add_task(process_sentiment_background)
 
         elif text in ("/status", "狀態", "資料狀態"):
-            status = get_holdings_status()
             await reply_flex(reply_token,
-                build_status_flex(status), "持股資料狀態")
+                build_status_flex(get_holdings_status()), "持股資料狀態")
 
         elif text in ("/reset", "重置", "清除記憶"):
             conversation_histories.pop(user_id, None)
@@ -333,7 +344,6 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 
 @app.get("/chart/latest.png")
 async def serve_chart():
-    """提供最新圓餅圖圖片給 LINE Image Message 使用"""
     png = _chart_cache.get("latest", b"")
     if not png:
         holdings = load_holdings()
@@ -359,8 +369,7 @@ async def test_api():
                 headers={"x-api-key": ANTH_KEY,
                          "anthropic-version": "2023-06-01",
                          "content-type": "application/json"},
-                json={"model": "claude-haiku-4-5-20251001",
-                      "max_tokens": 10,
+                json={"model": "claude-haiku-4-5-20251001", "max_tokens": 10,
                       "messages": [{"role": "user", "content": "hi"}]},
             )
         return {"anthropic": "OK" if resp.status_code == 200

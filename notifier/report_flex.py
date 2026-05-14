@@ -1,13 +1,7 @@
 """
-兩階段報告 Flex Message 產生器
-第一階段：總覽燈號卡片
-第二階段：個股詳細分析卡片群
-持股圓餅圖：純 Flex Message 實作，不消耗額外 Token
+Flex Message 產生器 - 全視覺化版本
 """
-import os
-import re
-import logging
-import httpx
+import os, re, logging, httpx
 
 log = logging.getLogger(__name__)
 
@@ -24,98 +18,140 @@ def _headers():
         "Content-Type": "application/json",
     }
 
-
 def _clean_text(text: str, max_len: int = 60) -> str:
-    """清除特殊字元，確保 LINE API 接受"""
-    if not text:
-        return ""
-    # 移除控制字元和不安全字元
-    text = re.sub(r'[\x00-\x1f\x7f]', '', text)
-    text = text.replace('"', '"').replace("'", "'")
+    if not text: return ""
+    text = re.sub(r'[\x00-\x1f\x7f]', '', str(text))
     return text[:max_len].strip()
 
-
 def _clean_url(url: str) -> str:
-    """確保 URL 是有效的 https 連結"""
-    if not url:
-        return ""
+    if not url: return ""
     url = url.strip()
-    if not url.startswith("http"):
-        return ""
-    # 移除有問題的字元
-    url = re.sub(r'[\s<>"\']', '', url)
-    return url[:500]
+    if not url.startswith("http"): return ""
+    return re.sub(r'[\s<>"\']', '', url)[:500]
 
-
-def _signal(t: dict) -> tuple[str, str, str]:
+def _signal(t: dict) -> tuple[str, str]:
     if not t or "error" in t:
-        return "#888780", "無資料", "#F1EFE8"
+        return "#888780", "無資料"
     rsi   = t.get("rsi", 50) or 50
     bb    = t.get("bb_pct", 50) or 50
     price = t.get("price", 0) or 0
     ma50  = t.get("ma50", 0) or 0
     pct_h = t.get("pct_from_high", 0) or 0
-    score = 0
-    if price and ma50 and price > ma50: score += 1
-    if rsi < 70: score += 1
-    if bb < 80: score += 1
-    if pct_h > -20: score += 1
-    if score >= 3:   return "#1D9E75", "謹慎樂觀", "#E1F5EE"
-    elif score == 2: return "#BA7517", "中性觀察", "#FAEEDA"
-    else:            return "#E24B4A", "注意風險", "#FCEBEB"
+    score = sum([
+        price > ma50 if (price and ma50) else False,
+        rsi < 70,
+        bb < 80,
+        pct_h > -20,
+    ])
+    if score >= 3:   return "#1D9E75", "謹慎樂觀"
+    elif score == 2: return "#BA7517", "中性觀察"
+    else:            return "#E24B4A", "注意風險"
 
 
-# ── 第一階段：總覽燈號 ──────────────────────────────
+# ── 第一階段：總覽（三色燈號版）──────────────────────
 
-def build_overview_flex(holdings: list, technicals: dict, date_str: str) -> dict:
+def build_overview_flex(holdings: list, technicals: dict,
+                        date_str: str, balance: dict = None) -> dict:
+    """
+    簡潔三區塊總覽：
+    - 帳戶摘要（淨值、市值、損益）
+    - 三色燈號分組（紅/黃/綠）
+    - 槓桿倍率與風險評級
+    """
+    from sources.balance_store import calc_leverage
+
     total_mv  = sum(h["market_value"] for h in holdings)
     total_pl  = sum(h["unrealized_pl"] for h in holdings)
-    total_day = sum(h.get("day_change", 0) for h in holdings)
-    pl_color  = "#1D9E75" if total_pl >= 0 else "#E24B4A"
-    day_color = "#1D9E75" if total_day >= 0 else "#E24B4A"
     pl_sign   = "+" if total_pl >= 0 else ""
-    day_sign  = "+" if total_day >= 0 else ""
-    red_cnt   = sum(1 for h in holdings
-                    if _signal(technicals.get(h["symbol"], {}))[0] == "#E24B4A")
-    yel_cnt   = sum(1 for h in holdings
-                    if _signal(technicals.get(h["symbol"], {}))[0] == "#BA7517")
+    pl_color  = "#1D9E75" if total_pl >= 0 else "#E24B4A"
 
-    rows = []
+    lev = calc_leverage(balance or {}, total_mv)
+    net_val = lev["net_value"] if lev["net_value"] > 0 else total_mv
+
+    # 三色分組
+    red, yellow, green = [], [], []
     for h in sorted(holdings, key=lambda x: -x["market_value"]):
-        sym   = h["symbol"]
-        t     = technicals.get(sym, {})
-        color, label, _ = _signal(t)
-        rsi   = t.get("rsi", "--")
-        rsi_s = f"{rsi:.1f}" if isinstance(rsi, float) else str(rsi)
-        rows.append({
-            "type": "box", "layout": "horizontal",
+        sym = h["symbol"]
+        t   = technicals.get(sym, {})
+        color, _ = _signal(t)
+        if color == "#E24B4A":   red.append(sym)
+        elif color == "#BA7517": yellow.append(sym)
+        else:                    green.append(sym)
+
+    def group_box(label: str, color: str, syms: list) -> dict:
+        if not syms:
+            syms_text = "（無）"
+        else:
+            syms_text = "  ".join(syms)
+        return {
+            "type": "box", "layout": "vertical",
+            "backgroundColor": color + "18",
+            "cornerRadius": "8px",
+            "paddingAll": "10px", "margin": "sm",
             "contents": [
-                {"type": "box", "layout": "vertical",
-                 "width": "8px", "backgroundColor": color,
-                 "contents": [{"type": "filler"}]},
                 {"type": "box", "layout": "horizontal",
-                 "paddingAll": "8px", "flex": 1,
                  "contents": [
-                     {"type": "text", "text": sym,
-                      "weight": "bold", "size": "sm",
-                      "color": "#111111", "flex": 2},
+                     {"type": "box", "layout": "vertical",
+                      "width": "8px", "height": "8px",
+                      "backgroundColor": color,
+                      "cornerRadius": "4px",
+                      "contents": [], "margin": "none"},
                      {"type": "text", "text": label,
-                      "size": "xs", "color": color, "flex": 3},
-                     {"type": "text", "text": f"RSI {rsi_s}",
-                      "size": "xs", "color": "#888888",
-                      "align": "end", "flex": 2},
-                 ]},
-            ],
-            "backgroundColor": "#FFFFFF",
-            "borderWidth": "0.5px", "borderColor": "#F0F0F0",
-            "margin": "xs",
-        })
+                      "size": "xs", "color": color,
+                      "weight": "bold", "margin": "sm"},
+                     {"type": "text",
+                      "text": f"{len(syms)} 檔",
+                      "size": "xs", "color": color,
+                      "align": "end"},
+                 ], "alignItems": "center"},
+                {"type": "text", "text": syms_text,
+                 "size": "sm", "color": "#333333",
+                 "wrap": True, "margin": "sm",
+                 "weight": "bold"},
+            ]
+        }
+
+    # 槓桿區塊
+    lev_ratio_text = f"{lev['ratio']}×" if lev["ratio"] else "待更新帳戶資訊"
+    lev_color  = lev["color"]
+    lev_level  = lev["level"]
+    lev_update = f"更新於 {lev['updated_at']}" if lev.get("updated_at") else "傳帳戶截圖更新"
+
+    lev_box = {
+        "type": "box", "layout": "horizontal",
+        "backgroundColor": "#F7F7F7",
+        "cornerRadius": "8px", "paddingAll": "12px",
+        "margin": "sm",
+        "contents": [
+            {"type": "box", "layout": "vertical", "flex": 1,
+             "contents": [
+                 {"type": "text", "text": "帳戶槓桿倍率",
+                  "size": "xs", "color": "#888888"},
+                 {"type": "text", "text": lev_ratio_text,
+                  "size": "xl", "weight": "bold",
+                  "color": lev_color},
+                 {"type": "text", "text": lev_level,
+                  "size": "xs", "color": lev_color,
+                  "margin": "xs"},
+             ]},
+            {"type": "box", "layout": "vertical", "flex": 1,
+             "contents": [
+                 {"type": "text", "text": "淨清倉價值",
+                  "size": "xs", "color": "#888888"},
+                 {"type": "text",
+                  "text": f"${net_val:,.0f}" if net_val else "待更新",
+                  "size": "md", "weight": "bold", "color": "#111111"},
+                 {"type": "text", "text": lev_update,
+                  "size": "xxs", "color": "#AAAAAA", "margin": "xs"},
+             ]},
+        ]
+    }
 
     return {
         "type": "bubble", "size": "giga",
         "header": {
             "type": "box", "layout": "vertical",
-            "backgroundColor": "#111111", "paddingAll": "16px",
+            "backgroundColor": "#111111", "paddingAll": "14px",
             "contents": [
                 {"type": "box", "layout": "horizontal", "contents": [
                     {"type": "text", "text": "持股健檢總覽",
@@ -124,51 +160,26 @@ def build_overview_flex(holdings: list, technicals: dict, date_str: str) -> dict
                     {"type": "text", "text": date_str,
                      "size": "xs", "color": "#888888", "align": "end"},
                 ]},
-                {"type": "text",
-                 "text": f"🔴 {red_cnt}檔注意  🟡 {yel_cnt}檔觀察  ✅ {len(holdings)-red_cnt-yel_cnt}檔正常",
-                 "size": "xs", "color": "#AAAAAA", "margin": "sm"},
+                {"type": "box", "layout": "horizontal",
+                 "margin": "sm", "contents": [
+                     {"type": "text",
+                      "text": f"持股市值 ${total_mv:,.0f}",
+                      "size": "sm", "color": "#CCCCCC", "flex": 1},
+                     {"type": "text",
+                      "text": f"損益 {pl_sign}${abs(total_pl):,.0f}",
+                      "size": "sm", "color": pl_color, "align": "end"},
+                 ]},
             ]
         },
         "body": {
             "type": "box", "layout": "vertical",
-            "paddingAll": "12px", "spacing": "sm",
+            "paddingAll": "12px",
             "contents": [
-                {"type": "box", "layout": "horizontal",
-                 "spacing": "sm", "contents": [
-                     {"type": "box", "layout": "vertical", "flex": 1,
-                      "backgroundColor": "#F7F7F7",
-                      "cornerRadius": "8px", "paddingAll": "10px",
-                      "contents": [
-                          {"type": "text", "text": "總市值",
-                           "size": "xs", "color": "#888888"},
-                          {"type": "text", "text": f"${total_mv:,.0f}",
-                           "size": "md", "weight": "bold", "color": "#111111"},
-                      ]},
-                     {"type": "box", "layout": "vertical", "flex": 1,
-                      "backgroundColor": "#F7F7F7",
-                      "cornerRadius": "8px", "paddingAll": "10px",
-                      "contents": [
-                          {"type": "text", "text": "未實現損益",
-                           "size": "xs", "color": "#888888"},
-                          {"type": "text",
-                           "text": f"{pl_sign}${abs(total_pl):,.0f}",
-                           "size": "md", "weight": "bold", "color": pl_color},
-                      ]},
-                     {"type": "box", "layout": "vertical", "flex": 1,
-                      "backgroundColor": "#F7F7F7",
-                      "cornerRadius": "8px", "paddingAll": "10px",
-                      "contents": [
-                          {"type": "text", "text": "今日損益",
-                           "size": "xs", "color": "#888888"},
-                          {"type": "text",
-                           "text": f"{day_sign}${abs(total_day):,.0f}",
-                           "size": "md", "weight": "bold", "color": day_color},
-                      ]},
-                ]},
-                {"type": "separator"},
-                {"type": "text", "text": "持股燈號",
-                 "size": "xs", "color": "#888888", "weight": "bold"},
-                *rows,
+                group_box("注意風險", "#E24B4A", red),
+                group_box("中性觀察", "#BA7517", yellow),
+                group_box("謹慎樂觀", "#1D9E75", green),
+                {"type": "separator", "margin": "md"},
+                lev_box,
             ]
         },
         "footer": {
@@ -191,11 +202,11 @@ def build_overview_flex(holdings: list, technicals: dict, date_str: str) -> dict
     }
 
 
-# ── 第二階段：個股卡片 ──────────────────────────────
+# ── 第二階段：個股詳細分析 ────────────────────────────
 
 def build_stock_card(h: dict, t: dict) -> dict:
     sym      = h["symbol"]
-    color, label, _ = _signal(t)
+    color, label = _signal(t)
     price    = t.get("price") or h.get("price", 0)
     rsi      = t.get("rsi", "--")
     bb       = t.get("bb_pct", "--")
@@ -211,7 +222,7 @@ def build_stock_card(h: dict, t: dict) -> dict:
     rsi_s    = f"{rsi:.1f}" if isinstance(rsi, float) else str(rsi)
     bb_s     = f"{bb:.0f}%" if isinstance(bb, float) else str(bb)
     pct_s    = f"{pct_h:.1f}%" if isinstance(pct_h, float) else str(pct_h)
-    price_s  = f"${price:.2f}" if isinstance(price, float) else f"${price}"
+    price_s  = f"${price:.2f}" if isinstance(price, (int, float)) else f"${price}"
 
     try:
         from BLIND_SPOTS_DATA import BLIND_SPOTS
@@ -263,53 +274,43 @@ def build_stock_card(h: dict, t: dict) -> dict:
             "type": "box", "layout": "vertical",
             "paddingAll": "12px", "spacing": "sm",
             "contents": [
-        {"type": "box", "layout": "horizontal",
-         "spacing": "xs", "contents": [
-             {"type": "box", "layout": "vertical", "flex": 1,
-              "backgroundColor": "#F7F7F7",
-              "cornerRadius": "6px", "paddingAll": "8px",
-              "contents": [
-                  {"type": "text", "text": "RSI",
-                   "size": "xxs", "color": "#888888"},
-                  {"type": "text", "text": rsi_s,
-                   "size": "md", "weight": "bold",
-                   "color": "#E24B4A" if (isinstance(rsi, float) and rsi > 70)
-                            else "#1D9E75" if (isinstance(rsi, float) and rsi < 30)
-                            else "#111111"},
-              ]},
-             {"type": "box", "layout": "vertical", "flex": 1,
-              "backgroundColor": "#F7F7F7",
-              "cornerRadius": "6px", "paddingAll": "8px",
-              "contents": [
-                  {"type": "text", "text": "布林帶",
-                   "size": "xxs", "color": "#888888"},
-                  {"type": "text", "text": bb_s,
-                   "size": "md", "weight": "bold",
-                   "color": "#111111"},
-              ]},
-             {"type": "box", "layout": "vertical", "flex": 1,
-              "backgroundColor": "#F7F7F7",
-              "cornerRadius": "6px", "paddingAll": "8px",
-              "contents": [
-                  {"type": "text", "text": "損益%",
-                   "size": "xxs", "color": "#888888"},
-                  {"type": "text",
-                   "text": f"{pl_sign}{pl_pct:.1f}%",
-                   "size": "md", "weight": "bold",
-                   "color": pl_color},
-              ]},
-             {"type": "box", "layout": "vertical", "flex": 1,
-              "backgroundColor": "#F7F7F7",
-              "cornerRadius": "6px", "paddingAll": "8px",
-              "contents": [
-                  {"type": "text", "text": "距高點",
-                   "size": "xxs", "color": "#888888"},
-                  {"type": "text", "text": pct_s,
-                   "size": "md", "weight": "bold",
-                   "color": "#E24B4A" if (isinstance(pct_h, float) and pct_h < -20)
-                            else "#111111"},
-              ]},
-         ]},
+                {"type": "box", "layout": "horizontal",
+                 "spacing": "xs",
+                 "contents": [
+                     {"type": "box", "layout": "vertical", "flex": 1,
+                      "backgroundColor": "#F7F7F7", "cornerRadius": "6px",
+                      "paddingAll": "8px", "contents": [
+                          {"type": "text", "text": "RSI", "size": "xxs", "color": "#888888"},
+                          {"type": "text", "text": rsi_s, "size": "md",
+                           "weight": "bold",
+                           "color": "#E24B4A" if (isinstance(rsi, float) and rsi > 70)
+                                    else "#1D9E75" if (isinstance(rsi, float) and rsi < 30)
+                                    else "#111111"},
+                      ]},
+                     {"type": "box", "layout": "vertical", "flex": 1,
+                      "backgroundColor": "#F7F7F7", "cornerRadius": "6px",
+                      "paddingAll": "8px", "contents": [
+                          {"type": "text", "text": "布林帶", "size": "xxs", "color": "#888888"},
+                          {"type": "text", "text": bb_s, "size": "md",
+                           "weight": "bold", "color": "#111111"},
+                      ]},
+                     {"type": "box", "layout": "vertical", "flex": 1,
+                      "backgroundColor": "#F7F7F7", "cornerRadius": "6px",
+                      "paddingAll": "8px", "contents": [
+                          {"type": "text", "text": "損益%", "size": "xxs", "color": "#888888"},
+                          {"type": "text", "text": f"{pl_sign}{pl_pct:.1f}%",
+                           "size": "md", "weight": "bold", "color": pl_color},
+                      ]},
+                     {"type": "box", "layout": "vertical", "flex": 1,
+                      "backgroundColor": "#F7F7F7", "cornerRadius": "6px",
+                      "paddingAll": "8px", "contents": [
+                          {"type": "text", "text": "距高點", "size": "xxs", "color": "#888888"},
+                          {"type": "text", "text": pct_s, "size": "md",
+                           "weight": "bold",
+                           "color": "#E24B4A" if (isinstance(pct_h, float) and pct_h < -20)
+                                    else "#111111"},
+                      ]},
+                 ]},
                 {"type": "separator"},
                 *sig_contents,
                 *blind_box,
@@ -320,7 +321,7 @@ def build_stock_card(h: dict, t: dict) -> dict:
 
 def build_detail_carousel(holdings: list, technicals: dict) -> dict:
     def priority(h):
-        c, _, _ = _signal(technicals.get(h["symbol"], {}))
+        c, _ = _signal(technicals.get(h["symbol"], {}))
         return {"#E24B4A": 0, "#BA7517": 1}.get(c, 2)
     sorted_h = sorted(holdings, key=priority)
     bubbles  = [build_stock_card(h, technicals.get(h["symbol"], {}))
@@ -328,99 +329,77 @@ def build_detail_carousel(holdings: list, technicals: dict) -> dict:
     return {"type": "carousel", "contents": bubbles}
 
 
-# ── 持股分布圓餅圖 ──────────────────────────────────
+# ── 持股分布（條狀圖）──────────────────────────────────
 
-def build_holdings_pie_flex(holdings: list) -> dict:
-    """
-    用 Flex Message 製作持股分布圓餅圖
-    完全不需要 AI，零額外 Token 消耗
-    """
-    total = sum(h["market_value"] for h in holdings)
+def build_holdings_pie_flex(holdings: list, balance: dict = None) -> dict:
+    from sources.balance_store import calc_leverage
+    total    = sum(h["market_value"] for h in holdings)
+    total_pl = sum(h["unrealized_pl"] for h in holdings)
     if total == 0:
         return {"type": "bubble",
                 "body": {"type": "box", "layout": "vertical",
-                         "contents": [{"type": "text",
-                                       "text": "尚無持股資料"}]}}
+                         "contents": [{"type": "text", "text": "尚無持股資料"}]}}
 
-    # 按市值排序，前8檔獨立顯示，其餘合併
+    lev = calc_leverage(balance or {}, total)
+    pl_sign  = "+" if total_pl >= 0 else ""
+    pl_color = "#1D9E75" if total_pl >= 0 else "#E24B4A"
+
     sorted_h = sorted(holdings, key=lambda x: -x["market_value"])
-    top8     = sorted_h[:8]
-    others   = sorted_h[8:]
-
+    top8, others = sorted_h[:8], sorted_h[8:]
     items = []
     for i, h in enumerate(top8):
         pct = h["market_value"] / total * 100
-        items.append({
-            "sym":   h["symbol"],
-            "mv":    h["market_value"],
-            "pl":    h["unrealized_pl"],
-            "pct":   pct,
-            "color": COLORS[i % len(COLORS)],
-        })
+        items.append({"sym": h["symbol"], "mv": h["market_value"],
+                      "pl": h["unrealized_pl"], "pct": pct,
+                      "color": COLORS[i % len(COLORS)]})
     if others:
-        other_mv = sum(h["market_value"] for h in others)
-        items.append({
-            "sym":   "其他",
-            "mv":    other_mv,
-            "pl":    sum(h["unrealized_pl"] for h in others),
-            "pct":   other_mv / total * 100,
-            "color": "#CCCCCC",
-        })
+        omv = sum(h["market_value"] for h in others)
+        items.append({"sym": "其他", "mv": omv,
+                      "pl": sum(h["unrealized_pl"] for h in others),
+                      "pct": omv / total * 100, "color": "#CCCCCC"})
 
-    total_pl   = sum(h["unrealized_pl"] for h in holdings)
-    pl_sign    = "+" if total_pl >= 0 else ""
-    pl_color   = "#1D9E75" if total_pl >= 0 else "#E24B4A"
-
-    # 用進度條模擬圓餅圖（LINE Flex 不支援真正的圓餅，但進度條視覺效果佳）
     bar_contents = []
     for item in items:
-        pct_w = max(1, int(item["pct"]))
-        pl_s  = "+" if item["pl"] >= 0 else ""
-        pl_c  = "#1D9E75" if item["pl"] >= 0 else "#E24B4A"
+        pw   = max(1, int(item["pct"]))
+        pl_s = "+" if item["pl"] >= 0 else ""
+        pl_c = "#1D9E75" if item["pl"] >= 0 else "#E24B4A"
         bar_contents.append({
-            "type": "box", "layout": "vertical",
-            "margin": "sm",
+            "type": "box", "layout": "vertical", "margin": "sm",
             "contents": [
                 {"type": "box", "layout": "horizontal",
+                 "alignItems": "center",
                  "contents": [
                      {"type": "box", "layout": "vertical",
                       "width": "12px", "height": "12px",
                       "backgroundColor": item["color"],
-                      "cornerRadius": "2px",
-                      "contents": [], "margin": "none"},
+                      "cornerRadius": "2px", "contents": []},
                      {"type": "text", "text": item["sym"],
                       "size": "sm", "weight": "bold",
                       "color": "#111111", "flex": 2, "margin": "sm"},
-                     {"type": "text",
-                      "text": f"${item['mv']:,.0f}",
+                     {"type": "text", "text": f"${item['mv']:,.0f}",
                       "size": "sm", "color": "#555555",
                       "flex": 3, "align": "end"},
-                     {"type": "text",
-                      "text": f"{item['pct']:.1f}%",
+                     {"type": "text", "text": f"{item['pct']:.1f}%",
                       "size": "sm", "color": "#888888",
                       "flex": 1, "align": "end"},
-                 ], "alignItems": "center"},
-                # 進度條
+                 ]},
                 {"type": "box", "layout": "horizontal",
                  "height": "8px", "margin": "xs",
-                 "backgroundColor": "#F0F0F0",
-                 "cornerRadius": "4px",
+                 "backgroundColor": "#F0F0F0", "cornerRadius": "4px",
                  "contents": [
-                     {"type": "box", "layout": "vertical",
-                      "flex": pct_w,
+                     {"type": "box", "layout": "vertical", "flex": pw,
                       "backgroundColor": item["color"],
-                      "cornerRadius": "4px",
-                      "contents": []},
-                     {"type": "filler",
-                      "flex": max(1, 100 - pct_w)},
+                      "cornerRadius": "4px", "contents": []},
+                     {"type": "filler", "flex": max(1, 100-pw)},
                  ]},
-                # 損益小標
                 {"type": "text",
                  "text": f"損益 {pl_s}${abs(item['pl']):,.0f}",
-                 "size": "xxs", "color": pl_c,
-                 "margin": "xs"},
+                 "size": "xxs", "color": pl_c, "margin": "xs"},
             ]
         })
+
+    lev_text = f"{lev['ratio']}× {lev['level']}" if lev["ratio"] else "待更新帳戶資訊"
+    lev_color = lev["color"]
 
     return {
         "type": "bubble", "size": "giga",
@@ -430,16 +409,17 @@ def build_holdings_pie_flex(holdings: list) -> dict:
             "contents": [
                 {"type": "text", "text": "持股分布",
                  "weight": "bold", "size": "lg", "color": "#FFFFFF"},
-                {"type": "box", "layout": "horizontal",
-                 "margin": "sm", "contents": [
+                {"type": "box", "layout": "horizontal", "margin": "sm",
+                 "contents": [
                      {"type": "text",
-                      "text": f"總市值 ${total:,.0f}",
+                      "text": f"市值 ${total:,.0f}",
                       "size": "sm", "color": "#CCCCCC", "flex": 1},
                      {"type": "text",
                       "text": f"損益 {pl_sign}${abs(total_pl):,.0f}",
-                      "size": "sm", "color": pl_color,
-                      "align": "end"},
+                      "size": "sm", "color": pl_color, "align": "end"},
                  ]},
+                {"type": "text", "text": f"槓桿 {lev_text}",
+                 "size": "xs", "color": lev_color, "margin": "xs"},
             ]
         },
         "body": {
@@ -450,145 +430,22 @@ def build_holdings_pie_flex(holdings: list) -> dict:
     }
 
 
-# ── 重點新聞 ────────────────────────────────────────
-
-def build_news_flex(news_data: dict) -> dict:
-    """重點新聞 Flex Message：中文標題 + 精華摘要，無連結"""
-    items = []
-    seen  = set()
-
-    for sym, news_list in news_data.items():
-        if not isinstance(news_list, list):
-            continue
-        for n in news_list:
-            if not isinstance(n, dict):
-                continue
-            # 優先用中文標題，沒有就用原文
-            title   = _clean_text(n.get("title_zh") or n.get("title") or "", 50)
-            summary = _clean_text(n.get("summary_zh") or "", 100)
-            src     = _clean_text(n.get("source") or n.get("publisher") or "新聞", 20)
-
-            if not title or title in seen:
-                continue
-            seen.add(title)
-            items.append((sym, title, summary, src))
-            if len(items) >= 5:
-                break
-        if len(items) >= 5:
-            break
-
-    if not items:
-        return {
-            "type": "bubble", "size": "giga",
-            "body": {
-                "type": "box", "layout": "vertical",
-                "paddingAll": "20px",
-                "contents": [
-                    {"type": "text", "text": "持股重點新聞",
-                     "weight": "bold", "size": "lg"},
-                    {"type": "text", "text": "目前無最新新聞資料",
-                     "size": "sm", "color": "#888888", "margin": "md"},
-                ]
-            }
-        }
-
-    news_boxes = []
-    for sym, title, summary, src in items:
-        contents = [
-            # 股票標籤 + 來源（用 box 包 text 實現背景色）
-            {"type": "box", "layout": "horizontal",
-             "spacing": "sm", "alignItems": "center",
-             "contents": [
-                 {"type": "box", "layout": "vertical",
-                  "backgroundColor": "#534AB7",
-                  "paddingStart": "6px", "paddingEnd": "6px",
-                  "paddingTop": "3px", "paddingBottom": "3px",
-                  "cornerRadius": "3px", "flex": 0,
-                  "contents": [
-                      {"type": "text", "text": sym,
-                       "size": "xxs", "color": "#FFFFFF"}
-                  ]},
-                 {"type": "text", "text": src,
-                  "size": "xxs", "color": "#888888"},
-             ]},
-            # 中文標題
-            {"type": "text", "text": title,
-             "size": "sm", "weight": "bold",
-             "color": "#111111", "wrap": True,
-             "margin": "sm", "maxLines": 2},
-        ]
-        # 有摘要就顯示
-        if summary:
-            contents.append({
-                "type": "text", "text": summary,
-                "size": "xs", "color": "#555555",
-                "wrap": True, "margin": "sm",
-                "maxLines": 4,
-            })
-
-        news_boxes.append({
-            "type": "box", "layout": "vertical",
-            "margin": "md", "paddingAll": "12px",
-            "backgroundColor": "#F8F8F8",
-            "cornerRadius": "8px",
-            "contents": contents,
-        })
-
-    return {
-        "type": "bubble", "size": "giga",
-        "header": {
-            "type": "box", "layout": "vertical",
-            "backgroundColor": "#111111", "paddingAll": "14px",
-            "contents": [
-                {"type": "text", "text": "🗞 持股重點新聞",
-                 "weight": "bold", "size": "lg", "color": "#FFFFFF"},
-                {"type": "text", "text": "AI 中文摘要 · 不含連結",
-                 "size": "xs", "color": "#888888", "margin": "xs"},
-            ]
-        },
-        "body": {
-            "type": "box", "layout": "vertical",
-            "paddingAll": "12px",
-            "contents": news_boxes,
-        }
-    }
-
-
-# ── 推播函式 ────────────────────────────────────────
-
-
-# ── 社群情緒條狀圖 ──────────────────────────────────
+# ── 社群情緒條狀圖 ────────────────────────────────────
 
 def build_sentiment_flex(sentiment_data: dict) -> dict:
-    """
-    社群情緒條狀圖 Flex Message
-    每檔股票一列：多頭綠條 + 空頭紅條 + 情緒分數
-    零 Token 消耗
-    """
-    # 過濾有資料的股票，按情緒分數排序
-    valid = [
-        (sym, s) for sym, s in sentiment_data.items()
-        if s.get("total", 0) > 0
-    ]
+    valid = [(sym, s) for sym, s in sentiment_data.items() if s.get("total", 0) > 0]
     valid.sort(key=lambda x: -x[1].get("score", 0))
-
     if not valid:
-        return {
-            "type": "bubble", "size": "giga",
-            "body": {
-                "type": "box", "layout": "vertical",
-                "paddingAll": "20px",
-                "contents": [
-                    {"type": "text", "text": "社群情緒",
-                     "weight": "bold", "size": "lg"},
-                    {"type": "text",
-                     "text": "目前無 StockTwits 資料",
-                     "size": "sm", "color": "#888888", "margin": "md"},
-                ]
-            }
-        }
+        return {"type": "bubble", "size": "giga",
+                "body": {"type": "box", "layout": "vertical",
+                         "paddingAll": "20px",
+                         "contents": [
+                             {"type": "text", "text": "社群情緒",
+                              "weight": "bold", "size": "lg"},
+                             {"type": "text", "text": "目前無 StockTwits 資料",
+                              "size": "sm", "color": "#888888", "margin": "md"},
+                         ]}}
 
-    # 整體多空統計
     total_bull = sum(s.get("bullish", 0) for _, s in valid)
     total_bear = sum(s.get("bearish", 0) for _, s in valid)
     total_all  = total_bull + total_bear
@@ -600,121 +457,78 @@ def build_sentiment_flex(sentiment_data: dict) -> dict:
 
     bar_rows = []
     for sym, s in valid:
-        bull  = s.get("bullish", 0)
-        bear  = s.get("bearish", 0)
-        total = bull + bear
-        score = s.get("score", 0)
-
+        bull = s.get("bullish", 0); bear = s.get("bearish", 0)
+        total = bull + bear; score = s.get("score", 0)
         bull_pct = int(bull / total * 100) if total > 0 else 50
         bear_pct = 100 - bull_pct
-
-        # 確保兩邊至少有 1 格寬
-        bull_flex = max(1, bull_pct)
-        bear_flex = max(1, bear_pct)
-
-        # 分數標籤
-        if score > 30:
-            score_color = "#1D9E75"
-            score_label = f"▲ {score}"
-        elif score < -30:
-            score_color = "#E24B4A"
-            score_label = f"▼ {abs(score)}"
-        else:
-            score_color = "#BA7517"
-            score_label = f"  {score}"
-
+        score_color = "#1D9E75" if score > 30 else "#E24B4A" if score < -30 else "#BA7517"
+        score_label = f"▲{score}" if score > 30 else f"▼{abs(score)}" if score < -30 else f"~{score}"
         bar_rows.append({
-            "type": "box", "layout": "vertical",
-            "margin": "md",
+            "type": "box", "layout": "vertical", "margin": "md",
             "contents": [
-                # 股票名稱 + 分數
                 {"type": "box", "layout": "horizontal",
                  "alignItems": "center",
                  "contents": [
-                     {"type": "text", "text": sym,
-                      "size": "sm", "weight": "bold",
-                      "color": "#111111", "flex": 2},
-                     {"type": "text",
-                      "text": f"多{bull} / 空{bear}",
+                     {"type": "text", "text": sym, "size": "sm",
+                      "weight": "bold", "color": "#111111", "flex": 2},
+                     {"type": "text", "text": f"多{bull}/空{bear}",
                       "size": "xxs", "color": "#888888", "flex": 3},
-                     {"type": "text", "text": score_label,
-                      "size": "sm", "weight": "bold",
-                      "color": score_color, "align": "end", "flex": 1},
+                     {"type": "text", "text": score_label, "size": "sm",
+                      "weight": "bold", "color": score_color,
+                      "align": "end", "flex": 1},
                  ]},
-                # 多空雙色條狀圖
                 {"type": "box", "layout": "horizontal",
-                 "height": "14px", "margin": "xs",
-                 "cornerRadius": "7px",
+                 "height": "14px", "margin": "xs", "cornerRadius": "7px",
                  "contents": [
                      {"type": "box", "layout": "vertical",
-                      "flex": bull_flex,
+                      "flex": max(1, bull_pct),
                       "backgroundColor": "#1D9E75",
-                      "cornerRadius": "7px"
-                      if bear_flex > 1 else "7px",
-                      "contents": []},
+                      "cornerRadius": "7px", "contents": []},
                      {"type": "box", "layout": "vertical",
-                      "flex": bear_flex,
+                      "flex": max(1, bear_pct),
                       "backgroundColor": "#E24B4A",
-                      "cornerRadius": "7px"
-                      if bull_flex > 1 else "7px",
-                      "contents": []},
+                      "cornerRadius": "7px", "contents": []},
                  ]},
-                # 百分比標示
-                {"type": "box", "layout": "horizontal",
-                 "margin": "xs",
+                {"type": "box", "layout": "horizontal", "margin": "xs",
                  "contents": [
-                     {"type": "text",
-                      "text": f"多 {bull_pct}%",
+                     {"type": "text", "text": f"多 {bull_pct}%",
                       "size": "xxs", "color": "#1D9E75"},
                      {"type": "filler"},
-                     {"type": "text",
-                      "text": f"{bear_pct}% 空",
+                     {"type": "text", "text": f"{bear_pct}% 空",
                       "size": "xxs", "color": "#E24B4A"},
                  ]},
             ]
         })
 
-    # 整體情緒大條
     overall_bar = {
-        "type": "box", "layout": "vertical",
-        "margin": "sm",
-        "backgroundColor": "#F7F7F7",
-        "cornerRadius": "10px",
+        "type": "box", "layout": "vertical", "margin": "sm",
+        "backgroundColor": "#F7F7F7", "cornerRadius": "10px",
         "paddingAll": "12px",
         "contents": [
-            {"type": "box", "layout": "horizontal",
-             "alignItems": "center",
+            {"type": "box", "layout": "horizontal", "alignItems": "center",
              "contents": [
                  {"type": "text", "text": "整體情緒",
                   "size": "sm", "color": "#555555", "flex": 1},
-                 {"type": "text", "text": overall_label,
-                  "size": "sm", "weight": "bold",
-                  "color": overall_color, "align": "end"},
+                 {"type": "text", "text": overall_label, "size": "sm",
+                  "weight": "bold", "color": overall_color, "align": "end"},
              ]},
             {"type": "box", "layout": "horizontal",
-             "height": "18px", "margin": "sm",
-             "cornerRadius": "9px",
+             "height": "18px", "margin": "sm", "cornerRadius": "9px",
              "contents": [
                  {"type": "box", "layout": "vertical",
-                  "flex": overall_pct,
-                  "backgroundColor": "#1D9E75",
-                  "cornerRadius": "9px",
-                  "contents": []},
+                  "flex": overall_pct, "backgroundColor": "#1D9E75",
+                  "cornerRadius": "9px", "contents": []},
                  {"type": "box", "layout": "vertical",
-                  "flex": max(1, 100 - overall_pct),
+                  "flex": max(1, 100-overall_pct),
                   "backgroundColor": "#E24B4A",
-                  "cornerRadius": "9px",
-                  "contents": []},
+                  "cornerRadius": "9px", "contents": []},
              ]},
-            {"type": "box", "layout": "horizontal",
-             "margin": "xs",
+            {"type": "box", "layout": "horizontal", "margin": "xs",
              "contents": [
-                 {"type": "text",
-                  "text": f"多頭 {total_bull} 則",
+                 {"type": "text", "text": f"多頭 {total_bull} 則",
                   "size": "xxs", "color": "#1D9E75"},
                  {"type": "filler"},
-                 {"type": "text",
-                  "text": f"{total_bear} 則 空頭",
+                 {"type": "text", "text": f"{total_bear} 則 空頭",
                   "size": "xxs", "color": "#E24B4A"},
              ]},
         ]
@@ -722,131 +536,150 @@ def build_sentiment_flex(sentiment_data: dict) -> dict:
 
     return {
         "type": "bubble", "size": "giga",
-        "header": {
-            "type": "box", "layout": "vertical",
-            "backgroundColor": "#111111", "paddingAll": "14px",
-            "contents": [
-                {"type": "text", "text": "社群情緒分析",
-                 "weight": "bold", "size": "lg", "color": "#FFFFFF"},
-                {"type": "text",
-                 "text": "資料來源：StockTwits · 綠=多頭 紅=空頭",
-                 "size": "xs", "color": "#888888", "margin": "xs"},
-            ]
-        },
-        "body": {
-            "type": "box", "layout": "vertical",
-            "paddingAll": "14px",
-            "contents": [
-                overall_bar,
-                {"type": "separator", "margin": "lg"},
-                *bar_rows,
-            ]
-        }
+        "header": {"type": "box", "layout": "vertical",
+                   "backgroundColor": "#111111", "paddingAll": "14px",
+                   "contents": [
+                       {"type": "text", "text": "社群情緒分析",
+                        "weight": "bold", "size": "lg", "color": "#FFFFFF"},
+                       {"type": "text",
+                        "text": "資料來源：StockTwits · 綠=多頭 紅=空頭",
+                        "size": "xs", "color": "#888888", "margin": "xs"},
+                   ]},
+        "body": {"type": "box", "layout": "vertical",
+                 "paddingAll": "14px",
+                 "contents": [overall_bar,
+                              {"type": "separator", "margin": "lg"},
+                              *bar_rows]}
     }
 
 
-async def push_flex(flex: dict, alt: str):
-    user_id = os.environ["LINE_USER_ID"]
-    alt = _clean_text(alt, 100) or "通知"
-    payload = {"to": user_id,
-                "messages": [{"type": "flex",
-                               "altText": alt,
-                               "contents": flex}]}
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            PUSH_URL, headers=_headers(), json=payload
-        )
-        if resp.status_code != 200:
-            # 印出完整錯誤，幫助找出哪個欄位出問題
-            log.error(f"push_flex {resp.status_code}: {resp.text[:500]}")
-            # 嘗試找出有問題的字串
-            import json as _json
-            flat = _json.dumps(flex, ensure_ascii=False)
-            if len(flat) > 50000:
-                log.error(f"Flex 太大：{len(flat)} bytes（上限約 50000）")
-        resp.raise_for_status()
+# ── 新聞（兩區塊）──────────────────────────────────────
 
+def build_news_flex(news_data: dict) -> dict:
+    """
+    兩大區塊新聞卡片：
+    1. 重大市場新聞（3則）
+    2. 持股相關新聞（5則）
+    """
+    # 相容舊格式（list）和新格式（dict）
+    if isinstance(news_data, list):
+        market_news = []
+        stock_news  = news_data
+    else:
+        market_news = news_data.get("market", [])
+        stock_news  = news_data.get("stocks", [])
 
-async def reply_flex(reply_token: str, flex: dict, alt: str):
-    alt = _clean_text(alt, 100) or "通知"
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(
-            REPLY_URL, headers=_headers(),
-            json={"replyToken": reply_token,
-                  "messages": [{"type": "flex",
-                                "altText": alt,
-                                "contents": flex}]}
-        )
-        if resp.status_code != 200:
-            log.error(f"reply_flex 失敗 {resp.status_code}: {resp.text[:300]}")
-        resp.raise_for_status()
+    def news_box(n: dict, sym: str = "") -> dict:
+        title   = _clean_text(n.get("title_zh") or n.get("title") or "", 45)
+        summary = _clean_text(n.get("summary_zh") or "", 90)
+        src     = _clean_text(n.get("publisher") or n.get("source") or "新聞", 20)
+        tag_sym = sym or n.get("symbol", "")
 
+        tag = []
+        if tag_sym:
+            tag = [{"type": "box", "layout": "vertical",
+                    "backgroundColor": "#534AB7",
+                    "paddingStart": "6px", "paddingEnd": "6px",
+                    "paddingTop": "3px", "paddingBottom": "3px",
+                    "cornerRadius": "3px", "flex": 0,
+                    "contents": [{"type": "text", "text": tag_sym,
+                                  "size": "xxs", "color": "#FFFFFF"}]}]
 
-# ── 系統訊息 Flex ──────────────────────────────────
-
-def build_status_flex(status_text: str) -> dict:
-    """持股資料狀態卡片"""
-    lines = status_text.split("\n")
-    rows  = []
-    for line in lines:
-        if "：" in line:
-            k, v = line.split("：", 1)
-            rows.append({
-                "type": "box", "layout": "horizontal",
-                "margin": "sm",
-                "contents": [
-                    {"type": "text", "text": k.strip(),
-                     "size": "sm", "color": "#888888", "flex": 2},
-                    {"type": "text", "text": v.strip(),
-                     "size": "sm", "color": "#111111",
-                     "flex": 3, "align": "end", "wrap": True},
-                ]
+        contents = [
+            {"type": "box", "layout": "horizontal",
+             "spacing": "sm", "alignItems": "center",
+             "contents": [*tag,
+                          {"type": "text", "text": src,
+                           "size": "xxs", "color": "#888888"}]},
+            {"type": "text", "text": title if title else "(無標題)",
+             "size": "sm", "weight": "bold", "color": "#111111",
+             "wrap": True, "margin": "sm", "maxLines": 2},
+        ]
+        if summary:
+            contents.append({
+                "type": "text", "text": summary,
+                "size": "xs", "color": "#555555",
+                "wrap": True, "margin": "sm", "maxLines": 3,
             })
-    if not rows:
-        rows = [{"type": "text", "text": status_text,
-                 "size": "sm", "color": "#888888", "wrap": True}]
-    return {
-        "type": "bubble",
-        "header": {
-            "type": "box", "layout": "vertical",
-            "backgroundColor": "#111111", "paddingAll": "14px",
+
+        return {"type": "box", "layout": "vertical",
+                "margin": "md", "paddingAll": "12px",
+                "backgroundColor": "#F8F8F8",
+                "cornerRadius": "8px",
+                "contents": contents}
+
+    body_contents = []
+
+    # 區塊一：重大市場新聞
+    if market_news:
+        body_contents.append({
+            "type": "box", "layout": "horizontal",
             "contents": [
-                {"type": "text", "text": "持股資料狀態",
-                 "weight": "bold", "size": "md", "color": "#FFFFFF"},
-            ]
-        },
-        "body": {
-            "type": "box", "layout": "vertical",
-            "paddingAll": "14px", "spacing": "none",
-            "contents": rows
-        },
-        "footer": {
-            "type": "box", "layout": "vertical",
-            "paddingAll": "10px",
-            "contents": [{
-                "type": "button",
-                "action": {"type": "message",
-                           "label": "上傳 CSV 更新持股",
-                           "text": "上傳CSV說明"},
-                "style": "secondary", "height": "sm"
-            }]
-        }
+                {"type": "box", "layout": "vertical",
+                 "width": "4px", "backgroundColor": "#E24B4A",
+                 "cornerRadius": "2px", "contents": []},
+                {"type": "text", "text": "重大市場新聞",
+                 "size": "sm", "weight": "bold",
+                 "color": "#111111", "margin": "sm"},
+            ], "alignItems": "center"
+        })
+        for n in market_news[:3]:
+            if not n.get("is_duplicate", False):
+                body_contents.append(news_box(n))
+
+    if market_news and stock_news:
+        body_contents.append({"type": "separator", "margin": "lg"})
+
+    # 區塊二：持股相關新聞
+    if stock_news:
+        body_contents.append({
+            "type": "box", "layout": "horizontal",
+            "contents": [
+                {"type": "box", "layout": "vertical",
+                 "width": "4px", "backgroundColor": "#534AB7",
+                 "cornerRadius": "2px", "contents": []},
+                {"type": "text", "text": "持股相關新聞",
+                 "size": "sm", "weight": "bold",
+                 "color": "#111111", "margin": "sm"},
+            ], "alignItems": "center"
+        })
+        for n in stock_news[:5]:
+            if not n.get("is_duplicate", False):
+                body_contents.append(news_box(n, n.get("symbol", "")))
+
+    if not body_contents:
+        body_contents = [{"type": "text", "text": "目前無最新新聞資料",
+                          "size": "sm", "color": "#888888", "align": "center"}]
+
+    return {
+        "type": "bubble", "size": "giga",
+        "header": {"type": "box", "layout": "vertical",
+                   "backgroundColor": "#111111", "paddingAll": "14px",
+                   "contents": [
+                       {"type": "text", "text": "🗞 持股重點新聞",
+                        "weight": "bold", "size": "lg", "color": "#FFFFFF"},
+                       {"type": "text",
+                        "text": "AI 中文摘要 · 同公司當天最多1則",
+                        "size": "xs", "color": "#888888", "margin": "xs"},
+                   ]},
+        "body": {"type": "box", "layout": "vertical",
+                 "paddingAll": "12px", "contents": body_contents}
     }
 
+
+# ── 系統 Flex ──────────────────────────────────────────
 
 def build_success_flex(title: str, holdings: list, extra_text: str = "") -> dict:
-    """CSV/截圖匯入成功卡片，直接顯示持股分布"""
     total  = sum(h["market_value"] for h in holdings)
     pl     = sum(h["unrealized_pl"] for h in holdings)
     sign   = "+" if pl >= 0 else ""
     color  = "#1D9E75" if pl >= 0 else "#E24B4A"
-
-    rows = []
+    rows   = []
     for i, h in enumerate(sorted(holdings, key=lambda x: -x["market_value"])[:8]):
-        pct  = h["market_value"] / total * 100 if total > 0 else 0
-        pw   = max(1, int(pct))
-        s    = "▲" if h["unrealized_pl"] >= 0 else "▼"
-        pc   = "#1D9E75" if h["unrealized_pl"] >= 0 else "#E24B4A"
+        pct = h["market_value"] / total * 100 if total > 0 else 0
+        pw  = max(1, int(pct))
+        s   = "▲" if h["unrealized_pl"] >= 0 else "▼"
+        pc  = "#1D9E75" if h["unrealized_pl"] >= 0 else "#E24B4A"
         rows.append({
             "type": "box", "layout": "vertical", "margin": "sm",
             "contents": [
@@ -856,14 +689,12 @@ def build_success_flex(title: str, holdings: list, extra_text: str = "") -> dict
                      {"type": "text", "text": h["symbol"],
                       "size": "sm", "weight": "bold",
                       "color": "#111111", "flex": 2},
-                     {"type": "text",
-                      "text": f"${h['market_value']:,.0f}",
+                     {"type": "text", "text": f"${h['market_value']:,.0f}",
                       "size": "sm", "color": "#555555",
                       "flex": 3, "align": "end"},
                      {"type": "text",
                       "text": f"{s}${abs(h['unrealized_pl']):,.0f}",
-                      "size": "xs", "color": pc,
-                      "flex": 2, "align": "end"},
+                      "size": "xs", "color": pc, "flex": 2, "align": "end"},
                  ]},
                 {"type": "box", "layout": "horizontal",
                  "height": "6px", "margin": "xs",
@@ -876,147 +707,222 @@ def build_success_flex(title: str, holdings: list, extra_text: str = "") -> dict
                  ]},
             ]
         })
-
-    extra = []
-    if extra_text:
-        extra = [{"type": "text", "text": extra_text,
-                  "size": "xs", "color": "#888888",
-                  "margin": "md", "wrap": True}]
-
+    extra = [{"type": "text", "text": extra_text, "size": "xs",
+              "color": "#888888", "margin": "md", "wrap": True}] if extra_text else []
     return {
         "type": "bubble", "size": "giga",
-        "header": {
-            "type": "box", "layout": "vertical",
-            "backgroundColor": "#1D9E75", "paddingAll": "14px",
-            "contents": [
-                {"type": "text", "text": f"✓ {title}",
-                 "weight": "bold", "size": "md", "color": "#FFFFFF"},
-                {"type": "box", "layout": "horizontal",
-                 "margin": "sm", "contents": [
-                     {"type": "text",
-                      "text": f"總市值 ${total:,.0f}",
-                      "size": "sm", "color": "#FFFFFF", "flex": 1},
-                     {"type": "text",
-                      "text": f"損益 {sign}${abs(pl):,.0f}",
-                      "size": "sm", "color": "#FFFFFF",
-                      "align": "end"},
-                 ]},
-            ]
-        },
-        "body": {
-            "type": "box", "layout": "vertical",
-            "paddingAll": "14px",
-            "contents": rows + extra
-        },
-        "footer": {
-            "type": "box", "layout": "horizontal",
-            "paddingAll": "10px", "spacing": "sm",
-            "contents": [
-                {"type": "button",
-                 "action": {"type": "message",
-                            "label": "今日總覽",
-                            "text": "/overview"},
-                 "style": "primary", "height": "sm",
-                 "color": "#1D9E75", "flex": 1},
-                {"type": "button",
-                 "action": {"type": "message",
-                            "label": "個股分析",
-                            "text": "/detail"},
-                 "style": "secondary", "height": "sm", "flex": 1},
-            ]
-        }
+        "header": {"type": "box", "layout": "vertical",
+                   "backgroundColor": "#1D9E75", "paddingAll": "14px",
+                   "contents": [
+                       {"type": "text", "text": f"✓ {title}",
+                        "weight": "bold", "size": "md", "color": "#FFFFFF"},
+                       {"type": "box", "layout": "horizontal", "margin": "sm",
+                        "contents": [
+                            {"type": "text", "text": f"市值 ${total:,.0f}",
+                             "size": "sm", "color": "#FFFFFF", "flex": 1},
+                            {"type": "text",
+                             "text": f"損益 {sign}${abs(pl):,.0f}",
+                             "size": "sm", "color": "#FFFFFF", "align": "end"},
+                        ]},
+                   ]},
+        "body": {"type": "box", "layout": "vertical",
+                 "paddingAll": "14px", "contents": rows + extra},
+        "footer": {"type": "box", "layout": "horizontal",
+                   "paddingAll": "10px", "spacing": "sm",
+                   "contents": [
+                       {"type": "button",
+                        "action": {"type": "message", "label": "今日總覽",
+                                   "text": "/overview"},
+                        "style": "primary", "height": "sm",
+                        "color": "#1D9E75", "flex": 1},
+                       {"type": "button",
+                        "action": {"type": "message", "label": "個股分析",
+                                   "text": "/detail"},
+                        "style": "secondary", "height": "sm", "flex": 1},
+                   ]}
+    }
+
+
+def build_balance_success_flex(balance: dict) -> dict:
+    """帳戶總結辨識成功卡片"""
+    net    = balance.get("net_value", 0)
+    margin = balance.get("margin_balance", 0)
+    total  = balance.get("total_market_value", 0)
+    cash   = balance.get("available_cash", 0)
+    lev_ratio = total / net if net > 0 and total > 0 else 0
+    lev_color = "#1D9E75" if lev_ratio < 1.2 else \
+                "#BA7517" if lev_ratio < 1.5 else "#E24B4A"
+
+    rows = [
+        ("淨清倉價值", f"${net:,.0f}", "#111111"),
+        ("持股總市值", f"${total:,.0f}", "#111111"),
+        ("融資借款",   f"${margin:,.0f}", "#E24B4A" if margin > 0 else "#111111"),
+        ("可用資金",   f"${cash:,.0f}", "#111111"),
+        ("槓桿倍率",   f"{lev_ratio:.2f}×" if lev_ratio > 0 else "N/A", lev_color),
+    ]
+    row_boxes = [
+        {"type": "box", "layout": "horizontal", "margin": "sm",
+         "contents": [
+             {"type": "text", "text": k, "size": "sm",
+              "color": "#888888", "flex": 2},
+             {"type": "text", "text": v, "size": "sm",
+              "weight": "bold", "color": c, "flex": 3, "align": "end"},
+         ]}
+        for k, v, c in rows
+    ]
+    return {
+        "type": "bubble",
+        "header": {"type": "box", "layout": "vertical",
+                   "backgroundColor": "#185FA5", "paddingAll": "14px",
+                   "contents": [
+                       {"type": "text", "text": "✓ 帳戶資訊已更新",
+                        "weight": "bold", "size": "md", "color": "#FFFFFF"},
+                       {"type": "text",
+                        "text": "槓桿與淨值資訊已同步，總覽將反映最新數據",
+                        "size": "xs", "color": "#CCCCCC", "margin": "xs",
+                        "wrap": True},
+                   ]},
+        "body": {"type": "box", "layout": "vertical",
+                 "paddingAll": "14px", "contents": row_boxes},
+        "footer": {"type": "box", "layout": "vertical", "paddingAll": "10px",
+                   "contents": [{"type": "button",
+                                 "action": {"type": "message",
+                                            "label": "查看今日總覽",
+                                            "text": "/overview"},
+                                 "style": "primary", "height": "sm",
+                                 "color": "#185FA5"}]}
+    }
+
+
+def build_status_flex(status_text: str) -> dict:
+    lines = status_text.split("\n")
+    rows  = []
+    for line in lines:
+        if "：" in line:
+            k, v = line.split("：", 1)
+            rows.append({"type": "box", "layout": "horizontal", "margin": "sm",
+                         "contents": [
+                             {"type": "text", "text": k.strip(), "size": "sm",
+                              "color": "#888888", "flex": 2},
+                             {"type": "text", "text": v.strip(), "size": "sm",
+                              "color": "#111111", "flex": 3, "align": "end",
+                              "wrap": True},
+                         ]})
+    if not rows:
+        rows = [{"type": "text", "text": status_text, "size": "sm",
+                 "color": "#888888", "wrap": True}]
+    return {
+        "type": "bubble",
+        "header": {"type": "box", "layout": "vertical",
+                   "backgroundColor": "#111111", "paddingAll": "14px",
+                   "contents": [{"type": "text", "text": "持股資料狀態",
+                                  "weight": "bold", "size": "md",
+                                  "color": "#FFFFFF"}]},
+        "body": {"type": "box", "layout": "vertical",
+                 "paddingAll": "14px", "spacing": "none",
+                 "contents": rows},
+        "footer": {"type": "box", "layout": "vertical", "paddingAll": "10px",
+                   "contents": [{"type": "button",
+                                 "action": {"type": "message",
+                                            "label": "上傳 CSV 更新持股",
+                                            "text": "上傳CSV說明"},
+                                 "style": "secondary", "height": "sm"}]}
     }
 
 
 def build_help_flex() -> dict:
-    """使用說明 Flex 卡片"""
     buttons = [
-        ("📊", "今日總覽", "/overview", "#1D9E75"),
-        ("📈", "個股分析", "/detail",   "#534AB7"),
-        ("🗞",  "重點新聞", "/news",     "#185FA5"),
-        ("💼", "我的持股", "/holdings", "#C07000"),
-        ("💬", "社群情緒", "/sentiment","#B5006E"),
+        ("📊", "今日總覽",  "/overview"),
+        ("📈", "個股分析",  "/detail"),
+        ("🗞",  "重點新聞",  "/news"),
+        ("💼", "我的持股",  "/holdings"),
+        ("💬", "社群情緒",  "/sentiment"),
     ]
-    btn_contents = []
-    for icon, label, cmd, color in buttons:
-        btn_contents.append({
-            "type": "button",
-            "action": {"type": "message",
-                       "label": f"{icon} {label}",
-                       "text": cmd},
-            "style": "secondary", "height": "sm",
-            "margin": "sm",
-        })
-
     return {
         "type": "bubble", "size": "giga",
-        "header": {
-            "type": "box", "layout": "vertical",
-            "backgroundColor": "#111111", "paddingAll": "14px",
-            "contents": [
-                {"type": "text", "text": "美股健檢機器人",
-                 "weight": "bold", "size": "lg", "color": "#FFFFFF"},
-                {"type": "text", "text": "點擊按鈕或上傳 CSV 開始使用",
-                 "size": "xs", "color": "#888888", "margin": "xs"},
-            ]
-        },
-        "body": {
-            "type": "box", "layout": "vertical",
-            "paddingAll": "12px",
-            "contents": [
-                {"type": "text", "text": "功能選單",
-                 "size": "xs", "color": "#888888",
-                 "weight": "bold", "margin": "none"},
-                *btn_contents,
-                {"type": "separator", "margin": "lg"},
-                {"type": "text", "text": "更新持股資料",
-                 "size": "xs", "color": "#888888",
-                 "weight": "bold", "margin": "lg"},
-                {"type": "text",
-                 "text": "直接傳送嘉信 CSV 檔案\n（Positions → Export）",
-                 "size": "sm", "color": "#555555",
-                 "wrap": True, "margin": "sm"},
-                {"type": "separator", "margin": "lg"},
-                {"type": "text",
-                 "text": "每日凌晨 5:30 自動推播健檢報告（週一至五）",
-                 "size": "xs", "color": "#888888",
-                 "wrap": True, "margin": "lg"},
-            ]
-        }
+        "header": {"type": "box", "layout": "vertical",
+                   "backgroundColor": "#111111", "paddingAll": "14px",
+                   "contents": [
+                       {"type": "text", "text": "美股健檢機器人",
+                        "weight": "bold", "size": "lg", "color": "#FFFFFF"},
+                       {"type": "text", "text": "點擊按鈕或上傳 CSV 開始使用",
+                        "size": "xs", "color": "#888888", "margin": "xs"},
+                   ]},
+        "body": {"type": "box", "layout": "vertical", "paddingAll": "12px",
+                 "contents": [
+                     {"type": "text", "text": "功能選單", "size": "xs",
+                      "color": "#888888", "weight": "bold"},
+                     *[{"type": "button",
+                        "action": {"type": "message", "label": f"{i} {l}", "text": c},
+                        "style": "secondary", "height": "sm", "margin": "sm"}
+                       for i, l, c in buttons],
+                     {"type": "separator", "margin": "lg"},
+                     {"type": "text", "text": "更新持股", "size": "xs",
+                      "color": "#888888", "weight": "bold", "margin": "lg"},
+                     {"type": "text",
+                      "text": "傳嘉信 CSV → 持股更新\n傳帳戶總結截圖 → 槓桿/淨值更新",
+                      "size": "sm", "color": "#555555",
+                      "wrap": True, "margin": "sm"},
+                     {"type": "separator", "margin": "lg"},
+                     {"type": "text",
+                      "text": "每日凌晨 5:30 自動推播健檢報告（週一至五）",
+                      "size": "xs", "color": "#888888",
+                      "wrap": True, "margin": "lg"},
+                 ]}
     }
 
 
 def build_clear_flex() -> dict:
-    """對話記憶清除確認卡片"""
     return {
         "type": "bubble",
-        "body": {
-            "type": "box", "layout": "vertical",
-            "paddingAll": "20px", "alignItems": "center",
-            "contents": [
-                {"type": "text", "text": "✓", "size": "5xl",
-                 "color": "#1D9E75", "align": "center"},
-                {"type": "text", "text": "對話記憶已清除",
-                 "weight": "bold", "size": "md",
-                 "color": "#111111", "align": "center",
-                 "margin": "md"},
-                {"type": "text",
-                 "text": "我們重新開始，有什麼想問的嗎？",
-                 "size": "sm", "color": "#888888",
-                 "align": "center", "wrap": True,
-                 "margin": "sm"},
-            ]
-        },
-        "footer": {
-            "type": "box", "layout": "vertical",
-            "paddingAll": "10px",
-            "contents": [{
-                "type": "button",
-                "action": {"type": "message",
-                           "label": "📊 開始健檢",
-                           "text": "/overview"},
-                "style": "primary", "height": "sm",
-                "color": "#1D9E75"
-            }]
-        }
+        "body": {"type": "box", "layout": "vertical",
+                 "paddingAll": "20px", "alignItems": "center",
+                 "contents": [
+                     {"type": "text", "text": "✓", "size": "5xl",
+                      "color": "#1D9E75", "align": "center"},
+                     {"type": "text", "text": "對話記憶已清除",
+                      "weight": "bold", "size": "md", "color": "#111111",
+                      "align": "center", "margin": "md"},
+                     {"type": "text", "text": "有什麼想問的嗎？",
+                      "size": "sm", "color": "#888888",
+                      "align": "center", "wrap": True, "margin": "sm"},
+                 ]},
+        "footer": {"type": "box", "layout": "vertical", "paddingAll": "10px",
+                   "contents": [{"type": "button",
+                                 "action": {"type": "message",
+                                            "label": "📊 開始健檢",
+                                            "text": "/overview"},
+                                 "style": "primary", "height": "sm",
+                                 "color": "#1D9E75"}]}
     }
+
+
+# ── 推播函式 ────────────────────────────────────────────
+
+async def push_flex(flex: dict, alt: str):
+    user_id = os.environ["LINE_USER_ID"]
+    alt = _clean_text(alt, 100) or "通知"
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(
+            PUSH_URL, headers=_headers(),
+            json={"to": user_id,
+                  "messages": [{"type": "flex", "altText": alt,
+                                "contents": flex}]}
+        )
+        if resp.status_code != 200:
+            log.error(f"push_flex {resp.status_code}: {resp.text[:300]}")
+        resp.raise_for_status()
+
+
+async def reply_flex(reply_token: str, flex: dict, alt: str):
+    alt = _clean_text(alt, 100) or "通知"
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(
+            REPLY_URL, headers=_headers(),
+            json={"replyToken": reply_token,
+                  "messages": [{"type": "flex", "altText": alt,
+                                "contents": flex}]}
+        )
+        if resp.status_code != 200:
+            log.error(f"reply_flex {resp.status_code}: {resp.text[:300]}")
+        resp.raise_for_status()
