@@ -117,7 +117,13 @@ def build_overview_flex(holdings: list, technicals: dict,
     lev_ratio_text = f"{lev['ratio']}×" if lev["ratio"] else "待更新帳戶資訊"
     lev_color  = lev["color"]
     lev_level  = lev["level"]
-    lev_update = f"更新於 {lev['updated_at']}" if lev.get("updated_at") else "傳CSV或帳戶截圖更新"
+    if lev.get("updated_at"):
+        if lev.get("is_stale"):
+            lev_update = f"融資餘額為 {lev['updated_at']} 資料，建議重新上傳CSV確認"
+        else:
+            lev_update = f"即時市值試算 · 融資餘額更新於 {lev['updated_at']}"
+    else:
+        lev_update = "傳CSV或帳戶截圖更新"
 
     lev_box = {
         "type": "box", "layout": "horizontal",
