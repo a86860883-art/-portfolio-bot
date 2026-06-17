@@ -141,18 +141,33 @@ async def process_news_background():
         if not holdings:
             await push_text("尚無持股資料，請先上傳 CSV")
             return
-        news = await get_news([h["symbol"] for h in holdings])
+        news = await get_news([h["symbol"] for h in holdings], holdings=holdings)
         try:
             await push_flex(build_news_flex(news), "持股重點新聞")
         except Exception as flex_err:
             log.warning(f"新聞 Flex 失敗，改文字：{flex_err}")
-            market = news.get("market", []) if isinstance(news, dict) else []
-            stocks = news.get("stocks", news) if isinstance(news, dict) else news
-            lines  = ["🗞 重大市場新聞\n"]
-            for n in market[:3]:
+            if isinstance(news, dict) and "global" in news:
+                global_news = news.get("global", [])
+                trending    = news.get("trending", [])
+                stocks      = news.get("stocks", [])
+            else:
+                global_news = news.get("market", []) if isinstance(news, dict) else []
+                trending    = []
+                stocks      = news.get("stocks", news) if isinstance(news, dict) else news
+
+            lines = ["🌍 國際重大事件\n"]
+            for n in global_news[:2]:
                 t = (n.get("title_zh") or n.get("title") or "")[:45]
                 s = (n.get("summary_zh") or "")[:70]
                 if t: lines.append(f"• {t}\n  {s}\n")
+
+            if trending:
+                lines.append("\n🔥 市場熱度個股\n")
+                for n in trending[:2]:
+                    t = (n.get("title_zh") or n.get("title") or "")[:45]
+                    s = (n.get("summary_zh") or "")[:70]
+                    if t: lines.append(f"• {t}\n  {s}\n")
+
             lines.append("\n📌 持股相關新聞\n")
             seen = set()
             for n in stocks[:5]:

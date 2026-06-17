@@ -37,7 +37,7 @@ async def daily_healthcheck():
     try:
         technicals, news = await asyncio.gather(
             analyze_technicals(tickers),
-            get_news(tickers),
+            get_news(tickers, holdings=holdings),
         )
 
         # 推播總覽燈號卡片

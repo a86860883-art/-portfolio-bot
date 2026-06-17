@@ -557,19 +557,56 @@ def build_sentiment_flex(sentiment_data: dict) -> dict:
 
 def build_news_flex(news_data: dict) -> dict:
     """
-    兩大區塊新聞卡片：
-    1. 重大市場新聞（3則）
-    2. 持股相關新聞（5則）
+    三大區塊新聞卡片：
+    1. 國際重大事件（2則）  - 不受持股影響
+    2. 市場熱度個股（2則）  - 不受持股影響
+    3. 持股相關新聞（3-5則）- 按持股市值 + 時效排序
     """
-    # 相容舊格式（list）和新格式（dict）
+    # 相容舊格式（list / 舊 dict）和新格式（三區塊 dict）
     if isinstance(news_data, list):
-        market_news = []
-        stock_news  = news_data
+        global_news   = []
+        trending_news = []
+        stock_news    = news_data
+    elif "global" in news_data:
+        global_news   = news_data.get("global", [])
+        trending_news = news_data.get("trending", [])
+        stock_news    = news_data.get("stocks", [])
     else:
-        market_news = news_data.get("market", [])
-        stock_news  = news_data.get("stocks", [])
+        # 向下相容舊的 market / stocks 格式
+        global_news   = news_data.get("market", [])
+        trending_news = []
+        stock_news    = news_data.get("stocks", [])
 
-    def news_box(n: dict, sym: str = "") -> dict:
+    def _section_header(text: str, bar_color: str, badge: str = "") -> dict:
+        badge_box = []
+        if badge:
+            badge_box = [{
+                "type": "box", "layout": "vertical",
+                "backgroundColor": bar_color + "22",
+                "paddingStart": "6px", "paddingEnd": "6px",
+                "paddingTop": "2px", "paddingBottom": "2px",
+                "cornerRadius": "3px", "flex": 0, "margin": "sm",
+                "contents": [{
+                    "type": "text", "text": badge,
+                    "size": "xxs", "color": bar_color, "weight": "bold",
+                }],
+            }]
+        return {
+            "type": "box", "layout": "horizontal",
+            "alignItems": "center",
+            "contents": [
+                {"type": "box", "layout": "vertical",
+                 "width": "4px", "backgroundColor": bar_color,
+                 "cornerRadius": "2px", "contents": []},
+                {"type": "text", "text": text,
+                 "size": "sm", "weight": "bold",
+                 "color": "#111111", "margin": "sm"},
+                *badge_box,
+                {"type": "filler"},
+            ],
+        }
+
+    def news_box(n: dict, sym: str = "", tag_color: str = "#534AB7") -> dict:
         title   = _clean_text(n.get("title_zh") or n.get("title") or "", 45)
         summary = _clean_text(n.get("summary_zh") or "", 90)
         src     = _clean_text(n.get("publisher") or n.get("source") or "新聞", 20)
@@ -578,7 +615,7 @@ def build_news_flex(news_data: dict) -> dict:
         tag = []
         if tag_sym:
             tag = [{"type": "box", "layout": "vertical",
-                    "backgroundColor": "#534AB7",
+                    "backgroundColor": tag_color,
                     "paddingStart": "6px", "paddingEnd": "6px",
                     "paddingTop": "3px", "paddingBottom": "3px",
                     "cornerRadius": "3px", "flex": 0,
@@ -610,39 +647,29 @@ def build_news_flex(news_data: dict) -> dict:
 
     body_contents = []
 
-    # 區塊一：重大市場新聞
-    if market_news:
-        body_contents.append({
-            "type": "box", "layout": "horizontal",
-            "contents": [
-                {"type": "box", "layout": "vertical",
-                 "width": "4px", "backgroundColor": "#E24B4A",
-                 "cornerRadius": "2px", "contents": []},
-                {"type": "text", "text": "重大市場新聞",
-                 "size": "sm", "weight": "bold",
-                 "color": "#111111", "margin": "sm"},
-            ], "alignItems": "center"
-        })
-        for n in market_news[:3]:
+    # 區塊一：國際重大事件
+    if global_news:
+        body_contents.append(_section_header("國際重大事件", "#E24B4A", "Global"))
+        for n in global_news[:2]:
             if not n.get("is_duplicate", False):
-                body_contents.append(news_box(n))
+                body_contents.append(news_box(n, tag_color="#E24B4A"))
 
-    if market_news and stock_news:
+    # 區塊二：市場熱度個股
+    if trending_news:
+        if body_contents:
+            body_contents.append({"type": "separator", "margin": "lg"})
+        body_contents.append(_section_header("市場熱度個股", "#BA7517", "Trending"))
+        for n in trending_news[:2]:
+            if not n.get("is_duplicate", False):
+                body_contents.append(news_box(n, tag_color="#BA7517"))
+
+    # 分隔線
+    if (global_news or trending_news) and stock_news:
         body_contents.append({"type": "separator", "margin": "lg"})
 
-    # 區塊二：持股相關新聞
+    # 區塊三：持股相關新聞
     if stock_news:
-        body_contents.append({
-            "type": "box", "layout": "horizontal",
-            "contents": [
-                {"type": "box", "layout": "vertical",
-                 "width": "4px", "backgroundColor": "#534AB7",
-                 "cornerRadius": "2px", "contents": []},
-                {"type": "text", "text": "持股相關新聞",
-                 "size": "sm", "weight": "bold",
-                 "color": "#111111", "margin": "sm"},
-            ], "alignItems": "center"
-        })
+        body_contents.append(_section_header("持股相關新聞", "#534AB7"))
         for n in stock_news[:5]:
             if not n.get("is_duplicate", False):
                 body_contents.append(news_box(n, n.get("symbol", "")))
@@ -659,7 +686,7 @@ def build_news_flex(news_data: dict) -> dict:
                        {"type": "text", "text": "🗞 持股重點新聞",
                         "weight": "bold", "size": "lg", "color": "#FFFFFF"},
                        {"type": "text",
-                        "text": "AI 中文摘要 · 同公司當天最多1則",
+                        "text": "國際大事 · 市場熱度 · 持股動態",
                         "size": "xs", "color": "#888888", "margin": "xs"},
                    ]},
         "body": {"type": "box", "layout": "vertical",
