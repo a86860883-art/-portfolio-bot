@@ -66,7 +66,9 @@ def build_overview_flex(holdings: list, technicals: dict,
     pl_color  = "#1D9E75" if total_pl >= 0 else "#E24B4A"
 
     lev = calc_leverage(balance or {}, total_mv)
-    net_val = lev["net_value"] if lev["net_value"] > 0 else total_mv
+    # 注意：淨清倉價值 ≠ 持股市值。若無有效帳戶資料（尚未上傳 CSV/截圖），
+    # 不可拿 total_mv（純持股市值加總）頂替顯示，否則會與融資槓桿後的真實淨值混淆。
+    net_val = lev["net_value"] if lev["net_value"] > 0 else None
 
     # 三色分組
     red, yellow, green = [], [], []
@@ -115,7 +117,7 @@ def build_overview_flex(holdings: list, technicals: dict,
     lev_ratio_text = f"{lev['ratio']}×" if lev["ratio"] else "待更新帳戶資訊"
     lev_color  = lev["color"]
     lev_level  = lev["level"]
-    lev_update = f"更新於 {lev['updated_at']}" if lev.get("updated_at") else "傳帳戶截圖更新"
+    lev_update = f"更新於 {lev['updated_at']}" if lev.get("updated_at") else "傳CSV或帳戶截圖更新"
 
     lev_box = {
         "type": "box", "layout": "horizontal",
@@ -139,7 +141,7 @@ def build_overview_flex(holdings: list, technicals: dict,
                  {"type": "text", "text": "淨清倉價值",
                   "size": "xs", "color": "#888888"},
                  {"type": "text",
-                  "text": f"${net_val:,.0f}" if net_val else "待更新",
+                  "text": f"${net_val:,.0f}" if net_val is not None else "待更新",
                   "size": "md", "weight": "bold", "color": "#111111"},
                  {"type": "text", "text": lev_update,
                   "size": "xxs", "color": "#AAAAAA", "margin": "xs"},

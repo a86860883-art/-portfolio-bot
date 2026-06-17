@@ -12,10 +12,17 @@ log = logging.getLogger(__name__)
 BALANCE_FILE = Path(os.environ.get("BALANCE_FILE", "/tmp/balance_cache.json"))
 
 
-def save_balance(data: dict):
+def save_balance(data: dict, source: str = "ocr"):
+    """
+    儲存帳戶資訊。
+    source: "ocr"（帳戶截圖辨識）或 "csv"（嘉信 CSV Positions Total 推算）
+    CSV 來源通常更即時且精確（每次持股更新都會同步），優先信任。
+    """
+    data = dict(data)
     data["updated_at"] = datetime.now().isoformat()
+    data["source"] = source
     BALANCE_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
-    log.info(f"帳戶資訊已儲存：淨值 ${data.get('net_value', 0):,.0f}")
+    log.info(f"帳戶資訊已儲存（來源:{source}）：淨值 ${data.get('net_value', 0):,.0f}")
 
 
 def load_balance() -> dict:
@@ -30,11 +37,12 @@ def load_balance() -> dict:
 def calc_leverage(balance: dict, total_market_value: float) -> dict:
     """
     計算槓桿倍率與風險等級
-    Returns: { ratio, level, color, margin, net_value, updated_at }
+    Returns: { ratio, level, color, margin, net_value, updated_at, source }
     """
     margin    = balance.get("margin_balance", 0)
     net_value = balance.get("net_value", 0)
     updated   = balance.get("updated_at", "")
+    source    = balance.get("source", "")
 
     if not balance or net_value <= 0:
         return {
@@ -44,6 +52,7 @@ def calc_leverage(balance: dict, total_market_value: float) -> dict:
             "margin":    0,
             "net_value": 0,
             "updated_at": "",
+            "source":    "",
         }
 
     # 槓桿 = 持股市值 ÷ 帳戶淨值
@@ -71,4 +80,5 @@ def calc_leverage(balance: dict, total_market_value: float) -> dict:
         "margin":    margin,
         "net_value": net_value,
         "updated_at": updated_str,
+        "source":    source,
     }

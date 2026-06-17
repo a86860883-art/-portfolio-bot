@@ -28,6 +28,7 @@ def parse_schwab_csv(content: str) -> list[dict]:
     """
     解析嘉信持倉 CSV，回傳標準持股格式
     跳過標題行、空白行、現金行、總計行
+    （現金/融資資訊另由 extract_account_summary() 取得）
     """
     lines = content.splitlines()
 
@@ -98,6 +99,75 @@ def parse_schwab_csv(content: str) -> list[dict]:
     return holdings
 
 
+def extract_account_summary(content: str) -> dict:
+    """
+    從嘉信 CSV 的「Cash & Cash Investments」與「Positions Total」行
+    推算帳戶淨值與融資借款，不需額外上傳帳戶截圖。
+
+    嘉信 CSV 中：
+    - "Cash & Cash Investments" 的 Mkt Val 若為負值，代表融資借款金額
+      （例如 -$90,731.90 表示融資借款 $90,731.90）
+    - "Positions Total" 的 Mkt Val 為「持股市值加總 + 現金（含負值）」
+      也就是帳戶淨清倉價值
+
+    Returns:
+        {
+            "net_value": float,          # 淨清倉價值（Positions Total Mkt Val）
+            "margin_balance": float,     # 融資借款金額（正數，取絕對值）
+            "cash_value": float,         # 原始現金值（可能為負）
+            "total_market_value": float, # 持股市值加總（不含現金）
+            "found": bool,               # 是否成功抓到資料
+        }
+        若 CSV 中找不到這兩行，found=False，其餘欄位為 0
+    """
+    lines = content.splitlines()
+
+    header_idx = None
+    for i, line in enumerate(lines):
+        if '"Symbol"' in line or 'Symbol' in line:
+            header_idx = i
+            break
+
+    if header_idx is None:
+        return {"net_value": 0.0, "margin_balance": 0.0,
+                "cash_value": 0.0, "total_market_value": 0.0, "found": False}
+
+    data_lines = "\n".join(lines[header_idx:])
+    reader = csv.DictReader(io.StringIO(data_lines))
+
+    cash_value  = 0.0
+    net_value   = 0.0
+    found_cash  = False
+    found_total = False
+
+    for row in reader:
+        symbol = row.get("Symbol", "").strip().strip('"')
+
+        def get(key_contains: str) -> str:
+            for k, v in row.items():
+                if key_contains.lower() in k.lower():
+                    return v or ""
+            return ""
+
+        if symbol.lower() == "cash & cash investments":
+            cash_value = _clean_num(get("Mkt Val"))
+            found_cash = True
+        elif symbol.lower() in ("positions total", "account total"):
+            net_value = _clean_num(get("Mkt Val"))
+            found_total = True
+
+    margin_balance = abs(cash_value) if cash_value < 0 else 0.0
+    total_market_value = net_value - cash_value  # 持股市值 = 淨值 - 現金(含負值融資)
+
+    return {
+        "net_value":          net_value,
+        "margin_balance":     margin_balance,
+        "cash_value":          cash_value,
+        "total_market_value": total_market_value,
+        "found":              found_cash or found_total,
+    }
+
+
 def parse_schwab_csv_bytes(data: bytes) -> list[dict]:
     """從 bytes 解析（LINE Bot 上傳檔案用）"""
     # 嘉信 CSV 通常是 UTF-8，但有時有 BOM
@@ -108,3 +178,15 @@ def parse_schwab_csv_bytes(data: bytes) -> list[dict]:
             continue
     log.error("CSV 編碼識別失敗")
     return []
+
+
+def extract_account_summary_bytes(data: bytes) -> dict:
+    """從 bytes 解析帳戶摘要（淨值/融資），與 parse_schwab_csv_bytes 搭配使用"""
+    for enc in ["utf-8-sig", "utf-8", "cp1252"]:
+        try:
+            return extract_account_summary(data.decode(enc))
+        except UnicodeDecodeError:
+            continue
+    log.error("CSV 編碼識別失敗（帳戶摘要）")
+    return {"net_value": 0.0, "margin_balance": 0.0,
+            "cash_value": 0.0, "total_market_value": 0.0, "found": False}

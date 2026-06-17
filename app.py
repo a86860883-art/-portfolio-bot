@@ -14,7 +14,7 @@ from sources.screenshot_ocr import extract_holdings_from_image
 from sources.balance_ocr import extract_balance_from_image
 from sources.balance_store import save_balance, load_balance, calc_leverage
 from sources.holdings_store import save_holdings, load_holdings, get_holdings_status
-from sources.csv_import import parse_schwab_csv_bytes
+from sources.csv_import import parse_schwab_csv_bytes, extract_account_summary_bytes
 from analyzers.technical import analyze_technicals
 from analyzers.ai_summary import generate_report
 from sources.stocktwits import get_sentiment
@@ -277,9 +277,33 @@ async def handle_csv_background(msg_id: str):
             await push_text("CSV 解析失敗，請確認是嘉信持倉明細 CSV")
             return
         save_holdings(holdings, source="csv")
+
+        # 同步從 CSV 的「Cash & Cash Investments」「Positions Total」
+        # 推算淨清倉價值與融資借款，不需額外上傳帳戶截圖
+        extra_text = "按下方按鈕開始健檢"
+        try:
+            summary = extract_account_summary_bytes(data)
+            if summary.get("found") and summary.get("net_value", 0) > 0:
+                save_balance({
+                    "net_value":          summary["net_value"],
+                    "margin_balance":      summary["margin_balance"],
+                    "total_market_value": summary["total_market_value"],
+                    "available_cash":     0.0,
+                }, source="csv")
+                ratio = (summary["total_market_value"] / summary["net_value"]
+                         if summary["net_value"] > 0 else 0)
+                extra_text = (
+                    f"淨清倉價值 ${summary['net_value']:,.0f}　"
+                    f"槓桿 {ratio:.2f}×\n按下方按鈕開始健檢"
+                )
+            else:
+                log.warning("CSV 中找不到 Cash & Cash Investments / Positions Total 行，槓桿待手動更新")
+        except Exception as bal_err:
+            log.warning(f"CSV 帳戶摘要推算失敗（不影響持股匯入）：{bal_err}")
+
         await push_flex(
             build_success_flex(f"CSV 匯入成功！{len(holdings)} 筆持股",
-                               holdings, "按下方按鈕開始健檢"),
+                               holdings, extra_text),
             "持股更新完成")
     except Exception as e:
         log.error(f"CSV 失敗：{e}", exc_info=True)
